@@ -297,7 +297,13 @@ app.post('/api/ai/chat', async (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
-  console.log(`Endpoints active: /api/health, /api/google/feed.xml, /api/shopify/discount, /api/shopify/orders, /api/tapstitch/order, /api/printful/order, /api/social/publish, /api/stripe/payout, /api/ai/chat`);
-});
+// Start server locally (skipped on Vercel)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
+    console.log(`Endpoints active: /api/health, /api/google/feed.xml, /api/shopify/discount, /api/shopify/orders, /api/tapstitch/order, /api/printful/order, /api/social/publish, /api/stripe/payout, /api/ai/chat`);
+  });
+}
+
+// Export for Vercel serverless
+module.exports = app;
