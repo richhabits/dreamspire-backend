@@ -51,6 +51,7 @@ app.get('/api/google/feed.xml', async (req, res) => {
     products.forEach(p => {
       const v = (p.variants && p.variants[0]) || {};
       const img = (p.images && p.images[0]) ? p.images[0].src : '';
+      const additionalImgs = (p.images || []).slice(1, 4).map(i => i.src);
       const desc = (p.body_html || '').replace(/<[^>]+>/g, ' ').substring(0, 500);
 
       xml += `    <item>
@@ -58,12 +59,28 @@ app.get('/api/google/feed.xml', async (req, res) => {
       <g:title><![CDATA[${p.title}]]></g:title>
       <g:description><![CDATA[${desc}]]></g:description>
       <g:link>https://${SHOPIFY_DOMAIN}/products/${p.handle}</g:link>
-      <g:image_link>${img}</g:image_link>
-      <g:brand>DreamSpire</g:brand>
+      <g:image_link>${img}</g:image_link>\n`;
+      
+      additionalImgs.forEach(addImg => {
+        xml += `      <g:additional_image_link>${addImg}</g:additional_image_link>\n`;
+      });
+
+      xml += `      <g:brand>DreamSpire</g:brand>
       <g:condition>new</g:condition>
-      <g:availability>${v.available ? 'in_stock' : 'out_of_stock'}</g:availability>
+      <g:availability>${v.available !== false ? 'in_stock' : 'out_of_stock'}</g:availability>
       <g:price>${v.price || '45.00'} GBP</g:price>
       <g:google_product_category>Apparel &amp; Accessories &gt; Clothing</g:google_product_category>
+      <g:product_type>500GSM Heavyweight Luxury Streetwear</g:product_type>
+      <g:material>100% Pre-Shrunk Loopback French Terry Cotton</g:material>
+      <g:gender>unisex</g:gender>
+      <g:age_group>adult</g:age_group>
+      <g:custom_label_0>Drop 001 Archive</g:custom_label_0>
+      <g:custom_label_1>500GSM Heavyweight</g:custom_label_1>
+      <g:shipping>
+        <g:country>GB</g:country>
+        <g:service>Royal Mail Tracked 24 (DDP)</g:service>
+        <g:price>0.00 GBP</g:price>
+      </g:shipping>
     </item>\n`;
     });
 
