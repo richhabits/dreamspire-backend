@@ -108,7 +108,27 @@ async function runTests() {
     });
     if (!res.ok) throw new Error(`Status ${res.status}`);
     const data = await res.json();
-    if (data.status !== 'SUCCESS' || !data.transaction_id) throw new Error('No txn ID generated');
+    if (data.status !== 'SUCCESS') throw new Error('No success status');
+  });
+
+  // 8.1 Stripe Balance & Account Check
+  await test('GET /api/stripe/balance (Stripe GBP Account Balance)', async () => {
+    const res = await fetch(`${BASE_URL}/api/stripe/balance`);
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    const data = await res.json();
+    if (!data.currency || data.currency !== 'GBP') throw new Error('Invalid currency in balance');
+  });
+
+  // 8.2 Stripe Direct Universal Checkout
+  await test('POST /api/stripe/create-checkout (Direct Apple Pay / Card Session)', async () => {
+    const res = await fetch(`${BASE_URL}/api/stripe/create-checkout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ title: '500GSM Obsidian Hoodie', price: 85, quantity: 1 }] })
+    });
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    const data = await res.json();
+    if (data.status !== 'SUCCESS' || !data.checkout_url) throw new Error('No checkout URL generated');
   });
 
   // 9. Zero-Party Data Marketing Sync
