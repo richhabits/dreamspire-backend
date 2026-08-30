@@ -1,0 +1,16 @@
+{
+  "name": "dreamspire-api-orchestrator",
+  "version": "1.0.0",
+  "description": "Node.js backend for DreamSpire ops dashboard",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test-suite.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2"
+  }
+}
