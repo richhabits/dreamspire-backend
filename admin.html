@@ -228,6 +228,44 @@
   }
   .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
   .field-error { color: var(--danger-text); font-size: 0.8rem; margin-top: 10px; }
+
+  .search-input {
+    width: 100%;
+    max-width: 340px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-family: inherit;
+  }
+
+  .attention-card {
+    background: var(--warn-bg);
+    border: 1px solid #f0dca0;
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 20px;
+  }
+  .attention-title { font-weight: 700; color: var(--warn-text); font-size: 0.9rem; margin-bottom: 8px; }
+  .attention-row { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 4px 0; color: var(--text); }
+  .clickable-row { cursor: pointer; }
+  .clickable-row:hover td { background: #fafbfb; }
+
+  /* REVENUE CHART */
+  .chart-svg-wrap { position: relative; }
+  .chart-tooltip {
+    position: absolute;
+    display: none;
+    background: #1a1d21;
+    color: #fff;
+    font-size: 0.75rem;
+    padding: 6px 10px;
+    border-radius: 5px;
+    pointer-events: none;
+    white-space: nowrap;
+    transform: translate(-50%, -110%);
+    z-index: 10;
+  }
 </style>
 </head>
 <body>
@@ -277,6 +315,15 @@
         </div>
       </div>
 
+      <div id="AttentionCard"></div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Revenue, last 90 days</div>
+        </div>
+        <div id="RevenueChartWrap" style="padding: 18px;"><div class="empty-state">Loading…</div></div>
+      </div>
+
       <div class="card">
         <div class="card-header">
           <div class="card-title">Recent orders</div>
@@ -291,12 +338,16 @@
       <div class="page-header">
         <div>
           <div class="page-title">Orders</div>
-          <div class="page-sub">Most recent 50, direct from Shopify Admin API</div>
+          <div class="page-sub">Direct from Shopify Admin API</div>
         </div>
         <button class="btn-secondary" onclick="loadOrders()">Refresh</button>
       </div>
       <div class="card">
+        <div style="padding: 14px 18px; border-bottom: 1px solid var(--border);">
+          <input type="text" id="OrdersSearch" class="search-input" placeholder="Search by order number or customer…" oninput="filterOrdersTable()">
+        </div>
         <div id="OrdersTableWrap"><div class="empty-state">Loading…</div></div>
+        <div style="padding: 14px 18px; text-align:center;" id="OrdersLoadMoreWrap"></div>
       </div>
     </div>
 
@@ -310,6 +361,9 @@
         <button class="btn-secondary" onclick="loadProducts()">Refresh</button>
       </div>
       <div class="card">
+        <div style="padding: 14px 18px; border-bottom: 1px solid var(--border);">
+          <input type="text" id="ProductsSearch" class="search-input" placeholder="Search products…" oninput="filterProductsTable()">
+        </div>
         <div id="ProductsTableWrap"><div class="empty-state">Loading…</div></div>
       </div>
     </div>
@@ -339,6 +393,17 @@
         <button class="btn-secondary" onclick="loadFulfillment()">Refresh</button>
       </div>
       <div id="FulfillmentCards" class="kpi-grid"><div class="empty-state">Loading…</div></div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">Locations</div></div>
+        <div id="LocationsWrap"><div class="empty-state">Loading…</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">Recent fulfillments</div></div>
+        <div id="RecentFulfillmentsWrap"><div class="empty-state">Loading…</div></div>
+      </div>
+
       <div class="card">
         <div class="card-header"><div class="card-title">About this page</div></div>
         <div style="padding: 16px 18px; font-size: 0.85rem; color: var(--text-muted); line-height: 1.6;">
@@ -436,6 +501,38 @@
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeEditProduct()">Cancel</button>
         <button class="btn" onclick="saveProductEdit()">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ORDER DETAIL MODAL -->
+  <div class="modal-overlay" id="OrderDetailModal">
+    <div class="modal-box" style="max-width: 520px;">
+      <div class="modal-title" id="OrderDetailTitle">Order</div>
+      <div id="OrderDetailBody"><div class="empty-state">Loading…</div></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeOrderDetail()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT DISCOUNT MODAL -->
+  <div class="modal-overlay" id="EditDiscountModal">
+    <div class="modal-box">
+      <div class="modal-title">Edit discount</div>
+      <input type="hidden" id="EditDiscountId">
+      <div class="field">
+        <label>Title</label>
+        <input type="text" id="EditDiscountTitle">
+      </div>
+      <div class="field">
+        <label>Percent off</label>
+        <input type="number" id="EditDiscountValue" min="1" max="100">
+      </div>
+      <div id="EditDiscountError" class="field-error"></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeEditDiscount()">Cancel</button>
+        <button class="btn" onclick="saveDiscountEdit()">Save changes</button>
       </div>
     </div>
   </div>
@@ -545,6 +642,11 @@
     }
   }
 
+  function handleOrderRowClick(evt, orderId) {
+    if (evt.target.closest('button')) return; // let action buttons handle their own click
+    openOrderDetail(orderId);
+  }
+
   function renderOrdersTable(orders, mountId, limit) {
     const wrap = document.getElementById(mountId);
     if (!orders || orders.length === 0) {
@@ -552,7 +654,7 @@
       return;
     }
     const rows = (limit ? orders.slice(0, limit) : orders).map(o => `
-      <tr>
+      <tr class="clickable-row" onclick="handleOrderRowClick(event, '${o.order_id}')">
         <td><strong>${o.id}</strong></td>
         <td>${o.name}</td>
         <td>${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
@@ -570,6 +672,84 @@
     `;
   }
 
+  function filterOrdersTable() {
+    if (!ordersCache || !ordersCache.orders) return;
+    const q = document.getElementById('OrdersSearch').value.trim().toLowerCase();
+    const filtered = q
+      ? ordersCache.orders.filter(o => o.id.toLowerCase().includes(q) || o.name.toLowerCase().includes(q))
+      : ordersCache.orders;
+    renderOrdersTable(filtered, 'OrdersTableWrap');
+  }
+
+  async function loadMoreOrders() {
+    if (!ordersCache || !ordersCache.next_cursor) return;
+    const btn = document.getElementById('OrdersLoadMoreBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+      const data = await api(`/api/shopify/orders?after=${encodeURIComponent(ordersCache.next_cursor)}`);
+      if (data.status !== 'SUCCESS') return;
+      ordersCache.orders = ordersCache.orders.concat(data.orders);
+      ordersCache.next_cursor = data.next_cursor;
+      renderOrdersTable(ordersCache.orders, 'OrdersTableWrap');
+      renderLoadMoreButton();
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Load more'; }
+    }
+  }
+
+  function renderLoadMoreButton() {
+    const wrap = document.getElementById('OrdersLoadMoreWrap');
+    if (!wrap) return;
+    wrap.innerHTML = ordersCache && ordersCache.next_cursor
+      ? '<button class="btn-secondary" id="OrdersLoadMoreBtn" onclick="loadMoreOrders()">Load more</button>'
+      : (ordersCache && ordersCache.orders && ordersCache.orders.length ? '<span class="muted" style="font-size:0.8rem;">All orders loaded.</span>' : '');
+  }
+
+  async function openOrderDetail(orderId) {
+    document.getElementById('OrderDetailModal').classList.add('is-open');
+    document.getElementById('OrderDetailTitle').textContent = 'Order';
+    document.getElementById('OrderDetailBody').innerHTML = '<div class="empty-state">Loading…</div>';
+    try {
+      const data = await api(`/api/shopify/orders/${orderId}/detail`);
+      if (data.status !== 'SUCCESS') {
+        document.getElementById('OrderDetailBody').innerHTML = `<div class="empty-state">${data.message || 'Could not load order.'}</div>`;
+        return;
+      }
+      const o = data.order;
+      document.getElementById('OrderDetailTitle').textContent = `Order ${o.id}`;
+      const addr = o.shipping_address;
+      const addrLines = addr ? [addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country].filter(Boolean) : [];
+      const items = o.line_items.map(li => `
+        <tr>
+          <td><strong>${li.title}</strong>${li.variant_title ? `<br><span class="muted" style="font-size:0.78rem;">${li.variant_title}</span>` : ''}</td>
+          <td>${li.quantity}</td>
+          <td>${money(li.price, o.currency)}</td>
+        </tr>
+      `).join('');
+      document.getElementById('OrderDetailBody').innerHTML = `
+        <div style="display:flex; gap:16px; margin-bottom:16px; font-size:0.85rem;">
+          <div><span class="muted">Customer</span><br><strong>${o.customer_name}</strong>${o.email ? `<br>${o.email}` : ''}</div>
+          <div><span class="muted">Placed</span><br><strong>${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</strong></div>
+        </div>
+        <table style="margin-bottom:14px;">
+          <thead><tr><th>Item</th><th>Qty</th><th>Price</th></tr></thead>
+          <tbody>${items}</tbody>
+        </table>
+        <div style="font-size:0.85rem; display:flex; justify-content:space-between; padding: 4px 0;"><span class="muted">Subtotal</span><span>${money(o.subtotal, o.currency)}</span></div>
+        <div style="font-size:0.85rem; display:flex; justify-content:space-between; padding: 4px 0;"><span class="muted">Shipping</span><span>${money(o.shipping, o.currency)}</span></div>
+        <div style="font-size:0.9rem; font-weight:700; display:flex; justify-content:space-between; padding: 6px 0; border-top:1px solid var(--border); margin-top:4px;"><span>Total</span><span>${money(o.total, o.currency)}</span></div>
+        ${addrLines.length ? `<div style="margin-top:16px; font-size:0.85rem;"><span class="muted">Shipping to</span><br>${addrLines.join(', ')}</div>` : ''}
+        ${o.note ? `<div style="margin-top:12px; font-size:0.85rem;"><span class="muted">Note</span><br>${o.note}</div>` : ''}
+      `;
+    } catch (err) {
+      document.getElementById('OrderDetailBody').innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
+  function closeOrderDetail() {
+    document.getElementById('OrderDetailModal').classList.remove('is-open');
+  }
+
   function showAuthExpired(mountId) {
     document.getElementById(mountId).innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>';
   }
@@ -585,6 +765,7 @@
       ordersCache = data;
       renderOrdersTable(data.orders, 'RecentOrdersWrap', 10);
       renderOrdersTable(data.orders, 'OrdersTableWrap');
+      renderLoadMoreButton();
 
       document.getElementById('KpiOrderCount').textContent = data.total_count.toLocaleString();
       const revenue = data.orders.reduce((sum, o) => sum + (o.status !== 'Cancelled' ? o.total : 0), 0);
@@ -603,7 +784,7 @@
       wrap.innerHTML = '<div class="empty-state">No products found.</div>';
       return;
     }
-    const rows = products.map((p, idx) => `
+    const rows = products.map(p => `
       <tr>
         <td>${p.image ? `<img class="thumb" src="${p.image}" onerror="this.style.display='none'">` : `<div class="thumb"></div>`}</td>
         <td><strong>${p.title}</strong><br><span class="muted" style="font-size:0.78rem;">${p.handle}</span></td>
@@ -611,7 +792,7 @@
         <td>£${p.price}</td>
         <td>${p.variant_count}</td>
         <td>${p.inventory}</td>
-        <td><button class="btn-link" onclick="openEditProduct(${idx})">Edit</button></td>
+        <td><button class="btn-link" onclick="openEditProduct('${p.id}')">Edit</button></td>
       </tr>
     `).join('');
     wrap.innerHTML = `
@@ -622,8 +803,18 @@
     `;
   }
 
-  function openEditProduct(idx) {
-    const p = productsCache.products[idx];
+  function filterProductsTable() {
+    if (!productsCache || !productsCache.products) return;
+    const q = document.getElementById('ProductsSearch').value.trim().toLowerCase();
+    const filtered = q
+      ? productsCache.products.filter(p => p.title.toLowerCase().includes(q) || p.handle.toLowerCase().includes(q))
+      : productsCache.products;
+    renderProductsTable(filtered, 'ProductsTableWrap');
+  }
+
+  function openEditProduct(productId) {
+    const p = productsCache.products.find(x => String(x.id) === String(productId));
+    if (!p) return;
     document.getElementById('EditProductId').value = p.id;
     document.getElementById('EditProductVariantId').value = p.primary_variant_id || '';
     document.getElementById('EditProductTitle').value = p.title;
@@ -697,6 +888,49 @@
       if (err.message === 'AUTH') { mount.innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>'; return; }
       mount.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
     }
+    loadLocations();
+    loadRecentFulfillments();
+  }
+
+  async function loadLocations() {
+    const wrap = document.getElementById('LocationsWrap');
+    try {
+      const data = await api('/api/shopify/locations');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('LocationsWrap', 'No live Shopify Admin API token configured.'); return; }
+      if (!data.locations || !data.locations.length) { wrap.innerHTML = '<div class="empty-state">No locations found.</div>'; return; }
+      const rows = data.locations.map(l => `
+        <tr>
+          <td><strong>${l.name}</strong></td>
+          <td>${l.country || '—'}</td>
+          <td>${l.active ? '<span class="badge success">Active</span>' : '<span class="badge neutral">Inactive</span>'}</td>
+        </tr>
+      `).join('');
+      wrap.innerHTML = `<table><thead><tr><th>Location</th><th>Country</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+    } catch (err) {
+      if (err.message === 'AUTH') { showAuthExpired('LocationsWrap'); return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
+  async function loadRecentFulfillments() {
+    const wrap = document.getElementById('RecentFulfillmentsWrap');
+    try {
+      const data = await api('/api/shopify/fulfillments/recent');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('RecentFulfillmentsWrap', 'No live Shopify Admin API token configured.'); return; }
+      if (!data.fulfillments || !data.fulfillments.length) { wrap.innerHTML = '<div class="empty-state">No fulfillments yet.</div>'; return; }
+      const rows = data.fulfillments.map(f => `
+        <tr>
+          <td><strong>${f.order_id}</strong></td>
+          <td>${new Date(f.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+          <td>${f.tracking_company || '—'}</td>
+          <td>${f.tracking_url ? `<a href="${f.tracking_url}" target="_blank" rel="noopener">${f.tracking_number}</a>` : (f.tracking_number || '—')}</td>
+        </tr>
+      `).join('');
+      wrap.innerHTML = `<table><thead><tr><th>Order</th><th>Date</th><th>Carrier</th><th>Tracking</th></tr></thead><tbody>${rows}</tbody></table>`;
+    } catch (err) {
+      if (err.message === 'AUTH') { showAuthExpired('RecentFulfillmentsWrap'); return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
   }
 
   async function loadStore() {
@@ -731,29 +965,93 @@
     document.getElementById(mountId).innerHTML = `<div class="empty-state">Not connected — ${message}</div>`;
   }
 
+  let discountsCache = null;
+
   async function loadDiscounts() {
     const wrap = document.getElementById('DiscountsTableWrap');
     try {
       const data = await api('/api/shopify/discounts');
       if (data.status === 'NOT_CONNECTED') { showNotConnected('DiscountsTableWrap', 'No live Shopify Admin API token configured.'); return; }
-      if (!data.discounts || data.discounts.length === 0) { wrap.innerHTML = '<div class="empty-state">No discount codes yet.</div>'; return; }
-      const rows = data.discounts.map(d => `
+      discountsCache = data.discounts || [];
+      if (!discountsCache.length) { wrap.innerHTML = '<div class="empty-state">No discount codes yet.</div>'; return; }
+      const rows = discountsCache.map(d => {
+        const isActive = d.status === 'ACTIVE';
+        return `
         <tr>
           <td><code>${d.code}</code></td>
           <td>${d.title}</td>
           <td>${d.percentage ? d.percentage + '% off' : '—'}</td>
-          <td>${d.status === 'ACTIVE' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${d.status}</span>`}</td>
+          <td>${isActive ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${d.status}</span>`}</td>
+          <td>
+            <div class="action-row">
+              <button class="btn-link" onclick="openEditDiscount('${d.id}')">Edit</button>
+              <button class="btn-link" onclick="toggleDiscount('${d.id}', ${!isActive})">${isActive ? 'Deactivate' : 'Activate'}</button>
+              <button class="btn-danger-link" onclick="deleteDiscount('${d.id}', '${d.code}')">Delete</button>
+            </div>
+          </td>
         </tr>
-      `).join('');
+      `;
+      }).join('');
       wrap.innerHTML = `
         <table>
-          <thead><tr><th>Code</th><th>Title</th><th>Value</th><th>Status</th></tr></thead>
+          <thead><tr><th>Code</th><th>Title</th><th>Value</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       `;
     } catch (err) {
       if (err.message === 'AUTH') { showAuthExpired('DiscountsTableWrap'); return; }
       wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
+  function openEditDiscount(id) {
+    const d = discountsCache.find(x => x.id === id);
+    if (!d) return;
+    document.getElementById('EditDiscountId').value = d.id;
+    document.getElementById('EditDiscountTitle').value = d.title;
+    document.getElementById('EditDiscountValue').value = d.percentage || 15;
+    document.getElementById('EditDiscountError').textContent = '';
+    document.getElementById('EditDiscountModal').classList.add('is-open');
+  }
+
+  function closeEditDiscount() {
+    document.getElementById('EditDiscountModal').classList.remove('is-open');
+  }
+
+  async function saveDiscountEdit() {
+    const id = document.getElementById('EditDiscountId').value;
+    const title = document.getElementById('EditDiscountTitle').value.trim();
+    const value = document.getElementById('EditDiscountValue').value;
+    const errEl = document.getElementById('EditDiscountError');
+    errEl.textContent = '';
+    try {
+      const data = await apiWrite('/api/shopify/discounts', 'PUT', { id, title, value });
+      if (data.status !== 'SUCCESS') { errEl.textContent = data.message || 'Could not save changes.'; return; }
+      closeEditDiscount();
+      setTimeout(loadDiscounts, 1500); // Shopify's discount index briefly lags real writes
+    } catch (err) {
+      errEl.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  async function toggleDiscount(id, activate) {
+    try {
+      const data = await apiWrite('/api/shopify/discounts/toggle', 'POST', { id, activate });
+      if (data.status !== 'SUCCESS') { alert('Could not update: ' + (data.message || 'unknown error')); return; }
+      setTimeout(loadDiscounts, 1500);
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  }
+
+  async function deleteDiscount(id, code) {
+    if (!confirm(`Permanently delete discount code "${code}"? This can't be undone.`)) return;
+    try {
+      const data = await apiWrite('/api/shopify/discounts/delete', 'POST', { id });
+      if (data.status !== 'SUCCESS') { alert('Could not delete: ' + (data.message || 'unknown error')); return; }
+      setTimeout(loadDiscounts, 1500);
+    } catch (err) {
+      alert('Error: ' + err.message);
     }
   }
 
@@ -766,7 +1064,7 @@
       const data = await apiWrite('/api/shopify/discount', 'POST', { code: code || undefined, value });
       if (data.status !== 'SUCCESS') { errEl.textContent = data.message || 'Could not create discount.'; return; }
       document.getElementById('NewDiscountCode').value = '';
-      loadDiscounts();
+      setTimeout(loadDiscounts, 1500);
     } catch (err) {
       errEl.textContent = 'Error: ' + err.message;
     }
@@ -805,6 +1103,103 @@
     }
   }
 
+  async function loadAttentionOrders() {
+    const wrap = document.getElementById('AttentionCard');
+    try {
+      const data = await api('/api/shopify/orders/attention');
+      if (data.status !== 'SUCCESS' || !data.orders || !data.orders.length) { wrap.innerHTML = ''; return; }
+      const rows = data.orders.map(o => `
+        <div class="attention-row">
+          <span><strong>${o.id}</strong> · ${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+          <span>${money(o.total, o.currency)}</span>
+        </div>
+      `).join('');
+      wrap.innerHTML = `
+        <div class="attention-card">
+          <div class="attention-title">⚠ ${data.orders.length} order${data.orders.length === 1 ? '' : 's'} unfulfilled for more than ${data.threshold_days} days</div>
+          ${rows}
+        </div>
+      `;
+    } catch (err) {
+      wrap.innerHTML = ''; // supplementary signal -- don't block the page if it fails
+    }
+  }
+
+  async function loadRevenueTrend() {
+    const wrap = document.getElementById('RevenueChartWrap');
+    try {
+      const data = await api('/api/shopify/analytics/revenue-trend?days=90');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('RevenueChartWrap', 'No live Shopify Admin API token configured.'); return; }
+      renderRevenueChart(data.series, data.currency || 'GBP', wrap);
+    } catch (err) {
+      if (err.message === 'AUTH') { showAuthExpired('RevenueChartWrap'); return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
+  function renderRevenueChart(series, currency, wrap) {
+    if (!series || !series.length) { wrap.innerHTML = '<div class="empty-state">No data.</div>'; return; }
+    const values = series.map(s => s.revenue);
+    const max = Math.max(...values, 1);
+    const allZero = values.every(v => v === 0);
+    const W = 900, H = 220, PAD_L = 8, PAD_R = 8, PAD_T = 12, PAD_B = 28;
+    const plotW = W - PAD_L - PAD_R;
+    const plotH = H - PAD_T - PAD_B;
+    const n = series.length;
+    const x = i => PAD_L + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    const y = v => PAD_T + plotH - (v / max) * plotH;
+
+    const linePoints = series.map((s, i) => `${x(i)},${y(s.revenue)}`).join(' ');
+    const areaPoints = `${x(0)},${PAD_T + plotH} ${linePoints} ${x(n - 1)},${PAD_T + plotH}`;
+
+    const gridLines = [0.33, 0.66, 1].map(f => {
+      const gy = PAD_T + plotH - f * plotH;
+      return `<line x1="${PAD_L}" y1="${gy}" x2="${W - PAD_R}" y2="${gy}" stroke="#eceef0" stroke-width="1"/>`;
+    }).join('');
+
+    const labelCount = Math.min(5, n);
+    const labelIdxs = Array.from({ length: labelCount }, (_, k) => Math.round(k * (n - 1) / (labelCount - 1 || 1)));
+    const xLabels = labelIdxs.map(i => {
+      const d = new Date(series[i].date);
+      const label = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      return `<text x="${x(i)}" y="${H - 8}" font-size="10" fill="#6b7177" text-anchor="middle">${label}</text>`;
+    }).join('');
+
+    const dots = series.map((s, i) => `<circle class="chart-dot" data-i="${i}" cx="${x(i)}" cy="${y(s.revenue)}" r="9" fill="transparent"/>`).join('');
+
+    wrap.innerHTML = `
+      <div class="chart-svg-wrap">
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:220px; display:block;" id="RevenueChartSvg" preserveAspectRatio="none">
+          ${gridLines}
+          <polyline points="${areaPoints}" fill="rgba(0,128,96,0.08)" stroke="none"/>
+          <polyline points="${linePoints}" fill="none" stroke="#008060" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          ${xLabels}
+          ${dots}
+        </svg>
+        <div class="chart-tooltip" id="RevenueChartTooltip"></div>
+      </div>
+      ${allZero ? '<div class="muted" style="font-size:0.8rem; margin-top:8px;">No orders in this period.</div>' : ''}
+    `;
+
+    const svg = document.getElementById('RevenueChartSvg');
+    const tooltip = document.getElementById('RevenueChartTooltip');
+    svg.querySelectorAll('.chart-dot').forEach(dot => {
+      dot.addEventListener('mouseenter', () => {
+        const i = parseInt(dot.getAttribute('data-i'), 10);
+        const s = series[i];
+        const rect = svg.getBoundingClientRect();
+        const px = (x(i) / W) * rect.width;
+        const py = (y(s.revenue) / H) * rect.height;
+        tooltip.style.display = 'block';
+        tooltip.style.left = px + 'px';
+        tooltip.style.top = py + 'px';
+        const d = new Date(s.date);
+        tooltip.textContent = `${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}: ${money(s.revenue, currency)}`;
+      });
+      dot.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     loadStore();
     loadOrders();
@@ -812,6 +1207,8 @@
     loadCustomers();
     loadFulfillment();
     loadDiscounts();
+    loadAttentionOrders();
+    loadRevenueTrend();
   });
 </script>
 </body>
