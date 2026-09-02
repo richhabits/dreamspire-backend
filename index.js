@@ -221,8 +221,11 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-demo-key-12345',
 });
 
-// 1. Health & Ecosystem Status Endpoint
-app.get('/api/health', (req, res) => {
+// 1. Health & Ecosystem Status Endpoint. Gated -- nothing public calls this
+// (confirmed against the theme repo), and it reveals which real credentials
+// are configured, which is unnecessary information to hand to anyone
+// unauthenticated.
+app.get('/api/health', requireDashboardAuth, (req, res) => {
   res.json({
     status: "OPERATIONAL",
     system: "DreamSpire Distributed Atelier Orchestrator",
@@ -354,11 +357,15 @@ app.get('/api/google/feed.xml', async (req, res) => {
       const img = (p.images && p.images[0]) ? p.images[0].src : '';
       const additionalImgs = (p.images || []).slice(1, 4).map(i => i.src);
       const desc = (p.body_html || '').replace(/<[^>]+>/g, ' ').substring(0, 500);
+      // A literal "]]>" inside a title/description would prematurely close
+      // the CDATA section and corrupt the whole feed for every product
+      // after it -- split any occurrence so it can't terminate the section.
+      const cdataSafe = s => String(s || '').replace(/\]\]>/g, ']] >');
 
       xml += `    <item>
       <g:id>${p.id}</g:id>
-      <g:title><![CDATA[${p.title}]]></g:title>
-      <g:description><![CDATA[${desc}]]></g:description>
+      <g:title><![CDATA[${cdataSafe(p.title)}]]></g:title>
+      <g:description><![CDATA[${cdataSafe(desc)}]]></g:description>
       <g:link>https://${SHOPIFY_DOMAIN}/products/${p.handle}</g:link>
       <g:image_link>${img}</g:image_link>\n`;
       
@@ -1055,97 +1062,6 @@ app.get('/api/shopify/customers', async (req, res) => {
   }
 });
 
-// 5. Tapstitch Cut & Sew 500GSM Production API
-app.post('/api/tapstitch/order', async (req, res) => {
-  const { product, quantity, priority, size } = req.body;
-  if (!product) return res.status(400).json({ error: "Missing product data." });
-
-  const poNumber = `PO-TAP-${Math.floor(100000 + Math.random() * 900000)}`;
-  res.json({
-    status: "SIMULATED",
-    po_number: poNumber,
-    fabric_spec: "500 GSM French Terry Loopback Cotton",
-    stitch_spec: "5-Thread Double Needle Coverstitch",
-    custom_labels: "DS-DAMASK-SATIN-TAG-01",
-    estimated_dispatch: "5-8 business days",
-    message: `SIMULATION ONLY — no real PO was sent. Real Tapstitch orders route automatically through Shopify's own fulfillment-service connection once a customer checks out; this button does not call Tapstitch directly. (Preview PO: ${poNumber} for ${quantity || 1}x ${product}, ${size || 'L'})`
-  });
-});
-
-// 6. Printful Accessories API v2
-app.post('/api/printful/order', async (req, res) => {
-  const { product, designFile } = req.body;
-  const syncId = `PF-${Math.floor(100000 + Math.random() * 900000)}`;
-  res.json({
-    status: "SIMULATED",
-    sync_id: syncId,
-    embroidery_spec: "3D High-Density Puff Embroidery (14,000 stitches)",
-    destination: "London Hub DDP",
-    message: `SIMULATION ONLY — no real order was sent. Printful is already connected as a real Shopify fulfillment service and receives orders automatically at checkout; this button does not call Printful directly. (Preview sync: ${syncId} for ${product || 'DreamSpire Trucker'})`
-  });
-});
-
-// 7. Universal Social Publisher API
-// No real TikTok Shop / Instagram / Snapchat publishing integration exists
-// (no OAuth app registered with any of these platforms). This previously
-// always returned a fabricated "SUCCESS" with a made-up reach estimate --
-// removed. Build real platform OAuth + posting before re-enabling this.
-app.post('/api/social/publish', (req, res) => {
-  res.status(501).json({
-    status: "NOT_IMPLEMENTED",
-    message: "No real social publishing integration exists yet. Each platform (TikTok Shop, Instagram, Snapchat) requires its own OAuth app and business API approval before this can post for real."
-  });
-});
-
-// 8. Stripe Balance & Account Inspection
-app.get('/api/stripe/balance', requireDashboardAuth, async (req, res) => {
-  const key = process.env.STRIPE_SECRET_KEY || '';
-  if (!stripe || key.includes('demo') || key.includes('placeholder') || key.includes('YOUR_PROD')) {
-    return res.json({ status: "NOT_CONNECTED", message: "No live Stripe secret key configured." });
-  }
-
-  try {
-    const balance = await stripe.balance.retrieve();
-    const gbpAvailable = balance.available.find(b => b.currency.toLowerCase() === 'gbp')?.amount || 0;
-    const gbpPending = balance.pending.find(b => b.currency.toLowerCase() === 'gbp')?.amount || 0;
-    res.json({
-      status: "SUCCESS",
-      available_gbp: (gbpAvailable / 100).toFixed(2),
-      pending_gbp: (gbpPending / 100).toFixed(2),
-      currency: "GBP"
-    });
-  } catch (err) {
-    res.status(500).json({ status: "ERROR", message: err.message });
-  }
-});
-
-// 8.1 Stripe Connect Creator Payout Engine
-// No creator affiliate program is actually built (no Stripe Connect
-// onboarding flow exists), so there is no real destination account to pay
-// out to. This previously fabricated a "successful transfer" with a fake
-// transaction ID whenever no real account was supplied -- removed.
-app.post('/api/stripe/payout', requireDashboardAuth, async (req, res) => {
-  const { amount, destinationAccount } = req.body;
-  const key = process.env.STRIPE_SECRET_KEY || '';
-  if (!stripe || key.includes('demo') || key.includes('placeholder') || key.includes('YOUR_PROD') || !destinationAccount) {
-    return res.status(400).json({
-      status: "NOT_CONNECTED",
-      message: "No real Stripe Connect destination account was provided. No creator payout system is built yet — this must never report a fake success."
-    });
-  }
-
-  try {
-    const transfer = await stripe.transfers.create({
-      amount: Math.round(parseFloat(amount || '0') * 100),
-      currency: 'gbp',
-      destination: destinationAccount
-    });
-    res.json({ status: "SUCCESS", transfer_id: transfer.id });
-  } catch (err) {
-    res.status(500).json({ status: "ERROR", message: err.message });
-  }
-});
-
 // 8.2 Stripe Direct Universal Checkout Generator
 // SECURITY: price is never taken from the client. The old version trusted
 // a client-supplied `price` per item straight into the real Stripe charge
@@ -1423,7 +1339,7 @@ app.post('/api/ai/chat', async (req, res) => {
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
     console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
-    console.log(`Endpoints active: /api/health, /api/google/feed.xml, /api/shopify/orders, /api/shopify/products, /api/shopify/shop, /api/fulfillment/status, /api/shopify/discount, /api/tapstitch/order, /api/printful/order, /api/ai/chat`);
+    console.log(`Endpoints active: /admin, /api/health, /api/google/feed.xml, /api/shopify/{orders,products,shop,customers,discounts,locations,fulfillments,analytics}, /api/fulfillment/status, /api/stripe/create-checkout, /api/marketing/sync, /api/ai/chat`);
   });
 }
 
