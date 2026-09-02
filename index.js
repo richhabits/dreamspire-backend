@@ -38,6 +38,7 @@ app.get(['/admin', '/admin.html'], requireDashboardAuth, (req, res) => {
 app.use('/api/shopify/orders', requireDashboardAuth);
 app.use('/api/shopify/products', requireDashboardAuth);
 app.use('/api/shopify/shop', requireDashboardAuth);
+app.use('/api/shopify/customers', requireDashboardAuth);
 app.use('/api/fulfillment/status', requireDashboardAuth);
 
 const PORT = process.env.PORT || 4000;
@@ -166,11 +167,9 @@ app.get('/api/google/feed.xml', async (req, res) => {
   }
 });
 
-// 3. Shopify Admin API - Generate Single-Use Discount Price Rule
-// Note: requires a `write_discounts` scope this app does not currently
-// have, and Shopify's legacy Price Rules REST endpoint is deprecated in
-// favor of the GraphQL discountCodeBasicCreate mutation. Left in place for
-// future real use, but it must report failure honestly rather than fake it.
+// 3. Shopify Admin API - Create a real percentage-off discount code.
+// Uses the modern GraphQL discountCodeBasicCreate mutation (Shopify's REST
+// Price Rules endpoint is deprecated). Requires write_discounts.
 app.post('/api/shopify/discount', requireDashboardAuth, async (req, res) => {
   const { code, value } = req.body;
   const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
@@ -179,37 +178,93 @@ app.post('/api/shopify/discount', requireDashboardAuth, async (req, res) => {
     return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
   }
 
-  const generatedCode = code || `SECURED-${Math.floor(1000 + Math.random() * 9000)}`;
+  const generatedCode = (code || `SECURED-${Math.floor(1000 + Math.random() * 9000)}`).toUpperCase();
+  const percentage = (parseFloat(value) || 15) / 100;
+
+  const mutation = `
+    mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+      discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+        codeDiscountNode { id }
+        userErrors { field message }
+      }
+    }
+  `;
+  const variables = {
+    basicCodeDiscount: {
+      title: generatedCode,
+      code: generatedCode,
+      startsAt: new Date().toISOString(),
+      customerSelection: { all: true },
+      customerGets: { value: { percentage }, items: { all: true } },
+      appliesOncePerCustomer: false
+    }
+  };
 
   try {
-    const ruleRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/price_rules.json`, {
+    const gqlRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/graphql.json`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': token
-      },
-      body: JSON.stringify({
-        price_rule: {
-          title: generatedCode,
-          target_type: "line_item",
-          target_selection: "all",
-          allocation_method: "across",
-          value_type: "percentage",
-          value: `-${value || 15}.0`,
-          customer_selection: "all",
-          starts_at: new Date().toISOString()
-        }
-      })
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ query: mutation, variables })
     });
-
-    if (ruleRes.ok) {
-      const ruleData = await ruleRes.json();
-      return res.json({ status: "SUCCESS", code: generatedCode, price_rule_id: ruleData.price_rule.id });
+    const gqlData = await gqlRes.json();
+    const result = gqlData?.data?.discountCodeBasicCreate;
+    if (result?.userErrors?.length) {
+      return res.status(400).json({ status: "ERROR", message: result.userErrors.map(e => e.message).join('; ') });
     }
-    const errBody = await ruleRes.text();
-    return res.status(ruleRes.status).json({ status: "ERROR", message: `Shopify rejected the request (${ruleRes.status}): ${errBody}` });
+    if (!result?.codeDiscountNode) {
+      return res.status(500).json({ status: "ERROR", message: gqlData.errors ? JSON.stringify(gqlData.errors) : "Unknown error creating discount." });
+    }
+    return res.json({ status: "SUCCESS", code: generatedCode, discount_id: result.codeDiscountNode.id });
   } catch (error) {
     res.status(500).json({ status: "ERROR", message: error.message });
+  }
+});
+
+// 3.1 Shopify Admin API - List real active discount codes. Requires read_discounts.
+app.get('/api/shopify/discounts', requireDashboardAuth, async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", discounts: [] });
+  }
+
+  const query = `
+    query {
+      codeDiscountNodes(first: 50) {
+        nodes {
+          id
+          codeDiscount {
+            ... on DiscountCodeBasic {
+              title
+              status
+              codes(first: 1) { nodes { code } }
+              customerGets { value { ... on DiscountPercentage { percentage } } }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const gqlRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/graphql.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ query })
+    });
+    const gqlData = await gqlRes.json();
+    const nodes = gqlData?.data?.codeDiscountNodes?.nodes || [];
+    const mapped = nodes
+      .filter(n => n.codeDiscount && n.codeDiscount.title !== undefined)
+      .map(n => ({
+        id: n.id,
+        title: n.codeDiscount.title,
+        status: n.codeDiscount.status,
+        code: n.codeDiscount.codes?.nodes?.[0]?.code || '',
+        percentage: n.codeDiscount.customerGets?.value?.percentage ? (n.codeDiscount.customerGets.value.percentage * 100).toFixed(0) : null
+      }));
+    return res.json({ status: "SUCCESS", discounts: mapped });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
   }
 });
 
@@ -254,6 +309,132 @@ app.get('/api/shopify/orders', async (req, res) => {
   }
 });
 
+// 4.0.1 Shopify Admin API - Mark an order fulfilled (all remaining
+// fulfillable line items). Requires write_orders. Uses the modern
+// fulfillment_orders flow, not the deprecated single-step fulfillment API.
+app.post('/api/shopify/orders/:id/fulfill', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  const { id } = req.params;
+  const { tracking_number, tracking_company, tracking_url } = req.body || {};
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+
+  try {
+    const foRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${id}/fulfillment_orders.json`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const foData = await foRes.json();
+    const openOrders = (foData.fulfillment_orders || []).filter(fo => fo.status === 'open' || fo.status === 'in_progress');
+
+    if (!openOrders.length) {
+      return res.status(400).json({ status: "ERROR", message: "No open fulfillment orders found — this order may already be fulfilled or has no fulfillable items." });
+    }
+
+    const fulfillment = {
+      line_items_by_fulfillment_order: openOrders.map(fo => ({ fulfillment_order_id: fo.id })),
+      notify_customer: true
+    };
+    if (tracking_number) {
+      fulfillment.tracking_info = {
+        number: tracking_number,
+        company: tracking_company || '',
+        url: tracking_url || ''
+      };
+    }
+
+    const fulfillRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/fulfillments.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ fulfillment })
+    });
+
+    if (!fulfillRes.ok) {
+      const errBody = await fulfillRes.text();
+      return res.status(fulfillRes.status).json({ status: "ERROR", message: `Shopify rejected the fulfillment (${fulfillRes.status}): ${errBody}` });
+    }
+    return res.json({ status: "SUCCESS" });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.0.2 Shopify Admin API - Cancel an order. Requires write_orders.
+app.post('/api/shopify/orders/:id/cancel', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  const { id } = req.params;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+
+  try {
+    const cancelRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${id}/cancel.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ reason: 'customer', restock: true })
+    });
+    if (!cancelRes.ok) {
+      const errBody = await cancelRes.text();
+      return res.status(cancelRes.status).json({ status: "ERROR", message: `Shopify rejected the cancellation (${cancelRes.status}): ${errBody}` });
+    }
+    return res.json({ status: "SUCCESS" });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.0.3 Shopify Admin API - Full refund of an order (all line items +
+// shipping, restocking). Requires write_orders.
+app.post('/api/shopify/orders/:id/refund', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  const { id } = req.params;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+
+  try {
+    const orderRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${id}.json`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const orderData = await orderRes.json();
+    const order = orderData.order;
+    if (!order) return res.status(404).json({ status: "ERROR", message: "Order not found." });
+
+    const refundLineItems = (order.line_items || []).map(li => ({
+      line_item_id: li.id,
+      quantity: li.quantity,
+      restock_type: 'return'
+    }));
+
+    const calcRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${id}/refunds/calculate.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ refund: { shipping: { full_refund: true }, refund_line_items: refundLineItems } })
+    });
+    if (!calcRes.ok) {
+      const errBody = await calcRes.text();
+      return res.status(calcRes.status).json({ status: "ERROR", message: `Shopify rejected the refund calculation (${calcRes.status}): ${errBody}` });
+    }
+    const calcData = await calcRes.json();
+
+    const refundRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/${id}/refunds.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ refund: calcData.refund })
+    });
+    if (!refundRes.ok) {
+      const errBody = await refundRes.text();
+      return res.status(refundRes.status).json({ status: "ERROR", message: `Shopify rejected the refund (${refundRes.status}): ${errBody}` });
+    }
+    return res.json({ status: "SUCCESS" });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
 // 4.1 Shopify Admin API - Real Product Catalog (Admin-level: includes
 // draft/inventory data, not just what's publicly visible on the storefront).
 // Replaces the old client-side fetch of a static real-shopify-products.json
@@ -277,10 +458,11 @@ app.get('/api/shopify/products', async (req, res) => {
     const data = await productsRes.json();
     const mapped = (data.products || []).map(p => {
       const variants = p.variants || [];
-      const cheapest = variants.reduce((min, v) => {
+      let cheapestVariant = null;
+      variants.forEach(v => {
         const price = parseFloat(v.price || '0');
-        return min === null || price < min ? price : min;
-      }, null);
+        if (!cheapestVariant || price < parseFloat(cheapestVariant.price || '0')) cheapestVariant = v;
+      });
       const totalInventory = variants.reduce((n, v) => n + (typeof v.inventory_quantity === 'number' ? v.inventory_quantity : 0), 0);
       return {
         id: p.id,
@@ -288,12 +470,59 @@ app.get('/api/shopify/products', async (req, res) => {
         handle: p.handle,
         status: p.status,
         image: (p.image && p.image.src) || (p.images && p.images[0] && p.images[0].src) || '',
-        price: cheapest === null ? '0.00' : cheapest.toFixed(2),
+        price: cheapestVariant ? parseFloat(cheapestVariant.price).toFixed(2) : '0.00',
+        primary_variant_id: cheapestVariant ? cheapestVariant.id : null,
         variant_count: variants.length,
         inventory: totalInventory
       };
     });
     return res.json({ status: "SUCCESS", products: mapped });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.1.1 Shopify Admin API - Edit a Product (title, status, and the price of
+// its primary/cheapest variant). Requires write_products.
+app.put('/api/shopify/products/:id', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  const { id } = req.params;
+  const { title, status, price, variant_id } = req.body;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+
+  try {
+    const productPayload = {};
+    if (title !== undefined) productPayload.title = title;
+    if (status !== undefined) productPayload.status = status;
+
+    if (Object.keys(productPayload).length) {
+      const prodRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products/${id}.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+        body: JSON.stringify({ product: { id, ...productPayload } })
+      });
+      if (!prodRes.ok) {
+        const errBody = await prodRes.text();
+        return res.status(prodRes.status).json({ status: "ERROR", message: `Shopify rejected the product update (${prodRes.status}): ${errBody}` });
+      }
+    }
+
+    if (price !== undefined && variant_id) {
+      const varRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/variants/${variant_id}.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+        body: JSON.stringify({ variant: { id: variant_id, price: String(price) } })
+      });
+      if (!varRes.ok) {
+        const errBody = await varRes.text();
+        return res.status(varRes.status).json({ status: "ERROR", message: `Shopify rejected the price update (${varRes.status}): ${errBody}` });
+      }
+    }
+
+    return res.json({ status: "SUCCESS" });
   } catch (err) {
     res.status(500).json({ status: "ERROR", message: err.message });
   }
@@ -326,6 +555,33 @@ app.get('/api/shopify/shop', async (req, res) => {
         created_at: s.created_at
       }
     });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.3 Shopify Admin API - Real Customer List (read-only). Requires read_customers.
+app.get('/api/shopify/customers', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", customers: [] });
+  }
+
+  try {
+    const custRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers.json?limit=100&order=total_spent+desc`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const data = await custRes.json();
+    const mapped = (data.customers || []).map(c => ({
+      id: c.id,
+      name: [c.first_name, c.last_name].filter(Boolean).join(' ') || '(no name on file)',
+      email: c.email || '',
+      orders_count: c.orders_count || 0,
+      total_spent: parseFloat(c.total_spent || '0'),
+      state: c.state,
+      created_at: c.created_at
+    }));
+    return res.json({ status: "SUCCESS", customers: mapped });
   } catch (err) {
     res.status(500).json({ status: "ERROR", message: err.message });
   }

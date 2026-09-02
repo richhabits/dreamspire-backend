@@ -188,6 +188,44 @@
     text-align: center;
     color: var(--text-muted);
   }
+
+  .btn-link { background: none; border: none; color: var(--accent); font-weight: 600; font-size: 0.82rem; cursor: pointer; padding: 4px 0; }
+  .btn-link:hover { text-decoration: underline; }
+  .btn-danger-link { background: none; border: none; color: var(--danger-text); font-weight: 600; font-size: 0.82rem; cursor: pointer; padding: 4px 0; }
+  .btn-danger-link:hover { text-decoration: underline; }
+  .action-row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 22, 24, 0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.is-open { display: flex; }
+  .modal-box {
+    background: var(--surface);
+    border-radius: 10px;
+    width: 92%;
+    max-width: 420px;
+    padding: 24px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+  }
+  .modal-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 18px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin-bottom: 5px; }
+  .field input, .field select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.88rem;
+    font-family: inherit;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .field-error { color: var(--danger-text); font-size: 0.8rem; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -197,7 +235,9 @@
     <div class="nav-item is-active" data-view="home" onclick="switchView('home', this)"><span class="nav-icon">🏠</span> Home</div>
     <div class="nav-item" data-view="orders" onclick="switchView('orders', this)"><span class="nav-icon">🧾</span> Orders</div>
     <div class="nav-item" data-view="products" onclick="switchView('products', this)"><span class="nav-icon">📦</span> Products</div>
+    <div class="nav-item" data-view="customers" onclick="switchView('customers', this)"><span class="nav-icon">👤</span> Customers</div>
     <div class="nav-item" data-view="fulfillment" onclick="switchView('fulfillment', this)"><span class="nav-icon">🚚</span> Fulfillment</div>
+    <div class="nav-item" data-view="discounts" onclick="switchView('discounts', this)"><span class="nav-icon">🏷️</span> Discounts</div>
     <div class="nav-item" data-view="store" onclick="switchView('store', this)"><span class="nav-icon">⚙️</span> Store</div>
   </aside>
 
@@ -269,6 +309,21 @@
       </div>
     </div>
 
+    <!-- CUSTOMERS -->
+    <div id="view-customers" class="view">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Customers</div>
+          <div class="page-sub">Real order history and lifetime spend, direct from Shopify</div>
+        </div>
+        <button class="btn-secondary" onclick="loadCustomers()">Refresh</button>
+      </div>
+      <div id="CustomersPiiNotice"></div>
+      <div class="card">
+        <div id="CustomersTableWrap"><div class="empty-state">Loading…</div></div>
+      </div>
+    </div>
+
     <!-- FULFILLMENT -->
     <div id="view-fulfillment" class="view">
       <div class="page-header">
@@ -290,6 +345,35 @@
       </div>
     </div>
 
+    <!-- DISCOUNTS -->
+    <div id="view-discounts" class="view">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Discounts</div>
+          <div class="page-sub">Real Shopify discount codes</div>
+        </div>
+        <button class="btn-secondary" onclick="loadDiscounts()">Refresh</button>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-title">Create a new code</div></div>
+        <div style="padding: 16px 18px; display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="field" style="margin-bottom:0; min-width:180px;">
+            <label>Code (optional — auto-generated if blank)</label>
+            <input type="text" id="NewDiscountCode" placeholder="e.g. WELCOME10">
+          </div>
+          <div class="field" style="margin-bottom:0; width:110px;">
+            <label>Percent off</label>
+            <input type="number" id="NewDiscountValue" value="15" min="1" max="100">
+          </div>
+          <button class="btn" onclick="createDiscount()">Create code</button>
+        </div>
+        <div id="NewDiscountError" class="field-error" style="padding: 0 18px 16px;"></div>
+      </div>
+      <div class="card">
+        <div id="DiscountsTableWrap"><div class="empty-state">Loading…</div></div>
+      </div>
+    </div>
+
     <!-- STORE -->
     <div id="view-store" class="view">
       <div class="page-header">
@@ -301,9 +385,55 @@
       <div class="card">
         <div id="StoreInfoWrap"><div class="empty-state">Loading…</div></div>
       </div>
+      <div class="card">
+        <div class="card-header"><div class="card-title">Not manageable from here</div></div>
+        <div style="padding: 16px 18px; font-size: 0.85rem; color: var(--text-muted); line-height: 1.6;">
+          Billing, staff accounts &amp; roles, security/2FA, payment gateway setup, and domain management are
+          Shopify account-level controls. Shopify does not expose write access to these outside its own console
+          for any app, for account-security reasons — so they open Shopify's real settings directly rather than
+          being faked here.
+        </div>
+        <div style="padding: 0 18px 18px; display:flex; flex-wrap:wrap; gap: 10px;">
+          <a class="btn-secondary" style="text-decoration:none;" href="https://admin.shopify.com/store/anznev-5s/settings/billing" target="_blank">Billing ↗</a>
+          <a class="btn-secondary" style="text-decoration:none;" href="https://admin.shopify.com/store/anznev-5s/settings/account/users" target="_blank">Users &amp; roles ↗</a>
+          <a class="btn-secondary" style="text-decoration:none;" href="https://admin.shopify.com/store/anznev-5s/settings/account/security" target="_blank">Security ↗</a>
+          <a class="btn-secondary" style="text-decoration:none;" href="https://admin.shopify.com/store/anznev-5s/settings/payments" target="_blank">Payments ↗</a>
+          <a class="btn-secondary" style="text-decoration:none;" href="https://admin.shopify.com/store/anznev-5s/settings/domains" target="_blank">Domains ↗</a>
+        </div>
+      </div>
     </div>
 
   </main>
+
+  <!-- EDIT PRODUCT MODAL -->
+  <div class="modal-overlay" id="EditProductModal">
+    <div class="modal-box">
+      <div class="modal-title">Edit product</div>
+      <input type="hidden" id="EditProductId">
+      <input type="hidden" id="EditProductVariantId">
+      <div class="field">
+        <label>Title</label>
+        <input type="text" id="EditProductTitle">
+      </div>
+      <div class="field">
+        <label>Price (£)</label>
+        <input type="number" id="EditProductPrice" step="0.01" min="0">
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <select id="EditProductStatus">
+          <option value="active">Active</option>
+          <option value="draft">Draft</option>
+          <option value="archived">Archived</option>
+        </select>
+      </div>
+      <div id="EditProductError" class="field-error"></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeEditProduct()">Cancel</button>
+        <button class="btn" onclick="saveProductEdit()">Save changes</button>
+      </div>
+    </div>
+  </div>
 
 <script>
   const DS_API_BASE = window.DS_API_BASE || window.location.origin;
@@ -339,12 +469,75 @@
     return `<span class="badge neutral">Unfulfilled</span>`;
   }
 
-  async function api(path) {
-    const res = await fetch(`${DS_API_BASE}${path}`);
+  async function api(path, opts) {
+    const res = await fetch(`${DS_API_BASE}${path}`, opts);
     if (res.status === 401) {
       throw new Error('AUTH');
     }
     return res.json();
+  }
+
+  async function apiWrite(path, method, body) {
+    return api(path, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  }
+
+  function orderActions(o) {
+    const btns = [];
+    const isCancelled = o.status === 'Cancelled';
+    const isFulfilled = (o.routed_to || '').toLowerCase() === 'fulfilled';
+    if (!isCancelled && !isFulfilled) {
+      btns.push(`<button class="btn-link" onclick="fulfillOrder('${o.order_id}', this)">Fulfill</button>`);
+    }
+    if (!isCancelled) {
+      btns.push(`<button class="btn-danger-link" onclick="cancelOrder('${o.order_id}', this)">Cancel</button>`);
+      if (o.status === 'paid' || o.status === 'partially_refunded') {
+        btns.push(`<button class="btn-danger-link" onclick="refundOrder('${o.order_id}', this)">Refund</button>`);
+      }
+    }
+    return btns.length ? `<div class="action-row">${btns.join('')}</div>` : '<span class="muted">—</span>';
+  }
+
+  async function fulfillOrder(orderId, btn) {
+    if (!confirm('Mark this order as fulfilled? This notifies the customer by email — only do this if it has genuinely shipped.')) return;
+    btn.disabled = true;
+    try {
+      const data = await apiWrite(`/api/shopify/orders/${orderId}/fulfill`, 'POST', {});
+      if (data.status !== 'SUCCESS') { alert('Could not fulfill: ' + (data.message || 'unknown error')); btn.disabled = false; return; }
+      loadOrders();
+    } catch (err) {
+      alert('Error: ' + err.message);
+      btn.disabled = false;
+    }
+  }
+
+  async function cancelOrder(orderId, btn) {
+    if (!confirm('Cancel this order? This is a real cancellation on Shopify and cannot be undone from here.')) return;
+    btn.disabled = true;
+    try {
+      const data = await apiWrite(`/api/shopify/orders/${orderId}/cancel`, 'POST', {});
+      if (data.status !== 'SUCCESS') { alert('Could not cancel: ' + (data.message || 'unknown error')); btn.disabled = false; return; }
+      loadOrders();
+    } catch (err) {
+      alert('Error: ' + err.message);
+      btn.disabled = false;
+    }
+  }
+
+  async function refundOrder(orderId, btn) {
+    if (!confirm('Issue a FULL refund for this order? This moves real money back to the customer and cannot be undone from here.')) return;
+    btn.disabled = true;
+    try {
+      const data = await apiWrite(`/api/shopify/orders/${orderId}/refund`, 'POST', {});
+      if (data.status !== 'SUCCESS') { alert('Could not refund: ' + (data.message || 'unknown error')); btn.disabled = false; return; }
+      loadOrders();
+    } catch (err) {
+      alert('Error: ' + err.message);
+      btn.disabled = false;
+    }
   }
 
   function renderOrdersTable(orders, mountId, limit) {
@@ -361,11 +554,12 @@
         <td>${money(o.total, o.currency)}</td>
         <td>${statusBadge(o.status)}</td>
         <td>${fulfillmentBadge(o.routed_to)}</td>
+        <td>${orderActions(o)}</td>
       </tr>
     `).join('');
     wrap.innerHTML = `
       <table>
-        <thead><tr><th>Order</th><th>Customer</th><th>Date</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead>
+        <thead><tr><th>Order</th><th>Customer</th><th>Date</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Actions</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -404,7 +598,7 @@
       wrap.innerHTML = '<div class="empty-state">No products found.</div>';
       return;
     }
-    const rows = products.map(p => `
+    const rows = products.map((p, idx) => `
       <tr>
         <td>${p.image ? `<img class="thumb" src="${p.image}" onerror="this.style.display='none'">` : `<div class="thumb"></div>`}</td>
         <td><strong>${p.title}</strong><br><span class="muted" style="font-size:0.78rem;">${p.handle}</span></td>
@@ -412,14 +606,51 @@
         <td>£${p.price}</td>
         <td>${p.variant_count}</td>
         <td>${p.inventory}</td>
+        <td><button class="btn-link" onclick="openEditProduct(${idx})">Edit</button></td>
       </tr>
     `).join('');
     wrap.innerHTML = `
       <table>
-        <thead><tr><th>Image</th><th>Product</th><th>Status</th><th>Price</th><th>Variants</th><th>Inventory</th></tr></thead>
+        <thead><tr><th>Image</th><th>Product</th><th>Status</th><th>Price</th><th>Variants</th><th>Inventory</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
+  }
+
+  function openEditProduct(idx) {
+    const p = productsCache.products[idx];
+    document.getElementById('EditProductId').value = p.id;
+    document.getElementById('EditProductVariantId').value = p.primary_variant_id || '';
+    document.getElementById('EditProductTitle').value = p.title;
+    document.getElementById('EditProductPrice').value = p.price;
+    document.getElementById('EditProductStatus').value = p.status;
+    document.getElementById('EditProductError').textContent = '';
+    document.getElementById('EditProductModal').classList.add('is-open');
+  }
+
+  function closeEditProduct() {
+    document.getElementById('EditProductModal').classList.remove('is-open');
+  }
+
+  async function saveProductEdit() {
+    const id = document.getElementById('EditProductId').value;
+    const variantId = document.getElementById('EditProductVariantId').value;
+    const title = document.getElementById('EditProductTitle').value.trim();
+    const price = document.getElementById('EditProductPrice').value;
+    const status = document.getElementById('EditProductStatus').value;
+    const errEl = document.getElementById('EditProductError');
+    errEl.textContent = '';
+
+    if (!title) { errEl.textContent = 'Title is required.'; return; }
+
+    try {
+      const data = await apiWrite(`/api/shopify/products/${id}`, 'PUT', { title, price, status, variant_id: variantId || undefined });
+      if (data.status !== 'SUCCESS') { errEl.textContent = data.message || 'Could not save changes.'; return; }
+      closeEditProduct();
+      loadProducts();
+    } catch (err) {
+      errEl.textContent = 'Error: ' + err.message;
+    }
   }
 
   async function loadProducts() {
@@ -495,11 +726,87 @@
     document.getElementById(mountId).innerHTML = `<div class="empty-state">Not connected — ${message}</div>`;
   }
 
+  async function loadDiscounts() {
+    const wrap = document.getElementById('DiscountsTableWrap');
+    try {
+      const data = await api('/api/shopify/discounts');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('DiscountsTableWrap', 'No live Shopify Admin API token configured.'); return; }
+      if (!data.discounts || data.discounts.length === 0) { wrap.innerHTML = '<div class="empty-state">No discount codes yet.</div>'; return; }
+      const rows = data.discounts.map(d => `
+        <tr>
+          <td><code>${d.code}</code></td>
+          <td>${d.title}</td>
+          <td>${d.percentage ? d.percentage + '% off' : '—'}</td>
+          <td>${d.status === 'ACTIVE' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${d.status}</span>`}</td>
+        </tr>
+      `).join('');
+      wrap.innerHTML = `
+        <table>
+          <thead><tr><th>Code</th><th>Title</th><th>Value</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    } catch (err) {
+      if (err.message === 'AUTH') { showAuthExpired('DiscountsTableWrap'); return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
+  async function createDiscount() {
+    const code = document.getElementById('NewDiscountCode').value.trim();
+    const value = document.getElementById('NewDiscountValue').value;
+    const errEl = document.getElementById('NewDiscountError');
+    errEl.textContent = '';
+    try {
+      const data = await apiWrite('/api/shopify/discount', 'POST', { code: code || undefined, value });
+      if (data.status !== 'SUCCESS') { errEl.textContent = data.message || 'Could not create discount.'; return; }
+      document.getElementById('NewDiscountCode').value = '';
+      loadDiscounts();
+    } catch (err) {
+      errEl.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  async function loadCustomers() {
+    const wrap = document.getElementById('CustomersTableWrap');
+    const notice = document.getElementById('CustomersPiiNotice');
+    try {
+      const data = await api('/api/shopify/customers');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('CustomersTableWrap', 'No live Shopify Admin API token configured.'); return; }
+      if (!data.customers || data.customers.length === 0) { wrap.innerHTML = '<div class="empty-state">No customers found.</div>'; return; }
+
+      const anyRedacted = data.customers.every(c => !c.email);
+      notice.innerHTML = anyRedacted
+        ? `<div class="card" style="padding:14px 18px; font-size:0.82rem; color: var(--text-muted);">Names and emails are showing blank — Shopify redacts that for any app until it's approved for "protected customer data" access (a separate Shopify review, not a scope toggle). Order counts and spend are still real.</div>`
+        : '';
+
+      const rows = data.customers.map(c => `
+        <tr>
+          <td><strong>${c.name}</strong>${c.email ? `<br><span class="muted" style="font-size:0.78rem;">${c.email}</span>` : ''}</td>
+          <td>${c.orders_count}</td>
+          <td>${money(c.total_spent)}</td>
+          <td>${c.state === 'enabled' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${c.state}</span>`}</td>
+        </tr>
+      `).join('');
+      wrap.innerHTML = `
+        <table>
+          <thead><tr><th>Customer</th><th>Orders</th><th>Total spent</th><th>Account</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    } catch (err) {
+      if (err.message === 'AUTH') { showAuthExpired('CustomersTableWrap'); return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     loadStore();
     loadOrders();
     loadProducts();
+    loadCustomers();
     loadFulfillment();
+    loadDiscounts();
   });
 </script>
 </body>
