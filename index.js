@@ -103,32 +103,42 @@ function requireDashboardAuth(req, res, next) {
   return res.status(401).json({ status: 'ERROR', message: 'Not signed in.' });
 }
 
-// Basic brute-force throttle on login attempts, keyed by IP. This is
-// in-memory, so on Vercel it only protects within one warm serverless
-// instance -- a cold start or a different region resets it. Real
-// protection here is the 20-char random password; this is a second,
-// honest-about-its-limits layer, not a guarantee.
-const loginAttempts = new Map(); // ip -> { count, resetAt }
-const LOGIN_MAX_ATTEMPTS = 10;
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-
-function tooManyLoginAttempts(ip) {
-  const now = Date.now();
-  const entry = loginAttempts.get(ip);
-  if (!entry || now > entry.resetAt) return false;
-  return entry.count >= LOGIN_MAX_ATTEMPTS;
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
 }
 
-function recordLoginAttempt(ip, failed) {
-  const now = Date.now();
-  const entry = loginAttempts.get(ip);
-  if (!entry || now > entry.resetAt) {
-    loginAttempts.set(ip, { count: failed ? 1 : 0, resetAt: now + LOGIN_WINDOW_MS });
-    return;
-  }
-  if (failed) entry.count++;
-  else loginAttempts.delete(ip); // successful login clears the counter
+// Basic per-IP throttle factory. In-memory, so on Vercel it only protects
+// within one warm serverless instance -- a cold start or a different region
+// resets it. That's an honest limitation, not a guarantee, but it's still a
+// real second layer worth having (e.g. login brute-force, or bounding
+// worst-case cost on a public endpoint that can call a paid API).
+function createRateLimiter(maxAttempts, windowMs) {
+  const attempts = new Map(); // ip -> { count, resetAt }
+  return {
+    isBlocked(ip) {
+      const now = Date.now();
+      const entry = attempts.get(ip);
+      if (!entry || now > entry.resetAt) return false;
+      return entry.count >= maxAttempts;
+    },
+    record(ip, failed) {
+      const now = Date.now();
+      const entry = attempts.get(ip);
+      if (!entry || now > entry.resetAt) {
+        attempts.set(ip, { count: failed ? 1 : 0, resetAt: now + windowMs });
+        return;
+      }
+      if (failed) entry.count++;
+      else attempts.delete(ip); // a real success clears the counter
+    }
+  };
 }
+
+// Real protection on login is still the 20-char random password; this is a
+// second, honest-about-its-limits layer, not a guarantee.
+const loginLimiter = createRateLimiter(10, 15 * 60 * 1000);
+function tooManyLoginAttempts(ip) { return loginLimiter.isBlocked(ip); }
+function recordLoginAttempt(ip, failed) { loginLimiter.record(ip, failed); }
 
 app.get('/admin/login', (req, res) => {
   if (!process.env.ADMIN_DASHBOARD_PASSWORD) {
@@ -142,7 +152,7 @@ app.post('/admin/login', (req, res) => {
   if (!configuredPassword) {
     return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
   }
-  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const ip = getClientIp(req);
   if (tooManyLoginAttempts(ip)) {
     return res.status(429).send('Too many attempts. Wait 15 minutes and try again.');
   }
@@ -1320,9 +1330,20 @@ app.post('/api/marketing/sync', async (req, res) => {
 });
 
 // 9. Secure AI Chat Proxy (Anthropic SDK + Free Multi-Model Engine)
+// Public/unauthenticated by design (the storefront chat widget calls this
+// directly), so it's the one endpoint here that could run up a real bill
+// with no login required once a live ANTHROPIC_API_KEY is configured --
+// rate-limited per IP to bound that, same as login.
+const aiChatLimiter = createRateLimiter(20, 5 * 60 * 1000);
+
 app.post('/api/ai/chat', async (req, res) => {
+  if (aiChatLimiter.isBlocked(getClientIp(req))) {
+    return res.status(429).json({ status: "ERROR", message: "Too many requests. Please wait a few minutes." });
+  }
+  aiChatLimiter.record(getClientIp(req), true);
+
   const { messages } = req.body;
-  
+
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: "Messages array payload required." });
   }
@@ -1341,7 +1362,7 @@ app.post('/api/ai/chat', async (req, res) => {
       }));
 
       const msg = await anthropic.messages.create({
-        model: "claude-3-5-sonnet-20240620",
+        model: "claude-sonnet-5",
         max_tokens: 1024,
         system: systemPrompt,
         messages: formattedMessages,
@@ -1349,7 +1370,7 @@ app.post('/api/ai/chat', async (req, res) => {
 
       return res.json({
         status: "SUCCESS",
-        model: "claude-3-5-sonnet",
+        model: "claude-sonnet-5",
         aiMessage: msg.content[0].text
       });
     } catch (error) {
@@ -1357,13 +1378,21 @@ app.post('/api/ai/chat', async (req, res) => {
     }
   }
 
-  // 2. Free Dynamic LLM Generation via Pollinations Multi-Model Pool (£0 Cost)
+  // 2. Free Dynamic LLM Generation via Pollinations Multi-Model Pool (£0 Cost).
+  // Note: this third-party service now caps concurrency at 1 in-flight
+  // request per source IP and 429s immediately above that (verified live --
+  // it did not behave this way when this was originally written), so this
+  // tier is meaningfully less reliable than the "£0 Cost" comment implies.
+  // A hard timeout is still added below regardless, since this call
+  // previously had none at all and could otherwise hang the whole request.
   try {
     const freeModels = ['openai', 'mistral', 'claude', 'llama', 'qwen'];
     const selectedModel = freeModels[Math.floor(Math.random() * freeModels.length)];
-    
+
     const url = `https://text.pollinations.ai/${encodeURIComponent(lastUserPrompt)}?model=${selectedModel}&system=${encodeURIComponent(systemPrompt)}&seed=${Date.now()}`;
-    const aiRes = await fetch(url);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const aiRes = await fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
     if (aiRes.ok) {
       const text = await aiRes.text();
       if (text && text.trim().length > 0) {
