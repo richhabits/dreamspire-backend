@@ -1,6 +1,7 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const { Anthropic } = require('@anthropic-ai/sdk');
 const Stripe = require('stripe');
 
@@ -10,6 +11,79 @@ const path = require('path');
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+// --- Dashboard login (real session cookie, not the browser's native HTTP
+// Basic Auth popup -- that has no branding, no logout, and behaves
+// inconsistently across browsers). A session is a signed, expiring token;
+// the signing key is derived from ADMIN_DASHBOARD_PASSWORD itself, so
+// rotating the password invalidates every existing session automatically.
+const SESSION_COOKIE = 'ds_session';
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function signSession(expiry) {
+  const secret = process.env.ADMIN_DASHBOARD_PASSWORD || '';
+  return crypto.createHmac('sha256', secret).update(String(expiry)).digest('hex');
+}
+
+function makeSessionCookieValue() {
+  const expiry = Date.now() + SESSION_MAX_AGE_MS;
+  return `${expiry}.${signSession(expiry)}`;
+}
+
+function verifySessionCookie(value) {
+  if (!value) return false;
+  const [expiryStr, sig] = value.split('.');
+  const expiry = parseInt(expiryStr, 10);
+  if (!expiry || !sig || Date.now() > expiry) return false;
+  const expected = signSession(expiry);
+  try {
+    return sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const out = {};
+  header.split(';').forEach(pair => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function loginPageHtml(showError) {
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DreamSpire Admin — Sign in</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', -apple-system, sans-serif; background: #f1f2f4; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .box { background: #fff; border: 1px solid #e3e5e8; border-radius: 10px; padding: 36px; width: 92%; max-width: 340px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+  .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.1rem; margin-bottom: 24px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #008060; }
+  label { display: block; font-size: 0.78rem; font-weight: 600; color: #6b7177; margin-bottom: 6px; }
+  input { width: 100%; padding: 10px 12px; border: 1px solid #e3e5e8; border-radius: 6px; font-size: 0.9rem; margin-bottom: 16px; }
+  button { width: 100%; background: #008060; color: #fff; border: none; padding: 10px; font-weight: 600; font-size: 0.9rem; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #006e52; }
+  .error { background: #fde7e7; color: #99241b; font-size: 0.82rem; padding: 10px 12px; border-radius: 6px; margin-bottom: 16px; }
+</style></head>
+<body>
+  <div class="box">
+    <div class="logo"><span class="dot"></span> DreamSpire Admin</div>
+    ${showError ? '<div class="error">Wrong password. Try again.</div>' : ''}
+    <form method="POST" action="/admin/login">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autofocus autocomplete="current-password">
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body></html>`;
+}
 
 // Password-gate the ops dashboard -- it will show real order/customer data
 // once SHOPIFY_ADMIN_ACCESS_TOKEN is set, so it must never be left open.
@@ -18,15 +92,50 @@ function requireDashboardAuth(req, res, next) {
   if (!configuredPassword) {
     return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
   }
-  const authHeader = req.headers.authorization || '';
-  const [scheme, encoded] = authHeader.split(' ');
-  if (scheme === 'Basic' && encoded) {
-    const [, suppliedPassword] = Buffer.from(encoded, 'base64').toString().split(':');
-    if (suppliedPassword === configuredPassword) return next();
+  const cookies = parseCookies(req);
+  if (verifySessionCookie(cookies[SESSION_COOKIE])) return next();
+
+  // Real page loads get sent to the login page; the dashboard's own fetch()
+  // calls for data get a plain 401 so the front-end can react in place.
+  if ((req.headers.accept || '').includes('text/html')) {
+    return res.redirect('/admin/login');
   }
-  res.set('WWW-Authenticate', 'Basic realm="DreamSpire Ops"');
-  return res.status(401).send('Authentication required.');
+  return res.status(401).json({ status: 'ERROR', message: 'Not signed in.' });
 }
+
+app.get('/admin/login', (req, res) => {
+  if (!process.env.ADMIN_DASHBOARD_PASSWORD) {
+    return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
+  }
+  res.set('Content-Type', 'text/html').send(loginPageHtml(req.query.error === '1'));
+});
+
+app.post('/admin/login', (req, res) => {
+  const configuredPassword = process.env.ADMIN_DASHBOARD_PASSWORD;
+  if (!configuredPassword) {
+    return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
+  }
+  const supplied = (req.body && req.body.password) || '';
+  const suppliedBuf = Buffer.from(supplied);
+  const expectedBuf = Buffer.from(configuredPassword);
+  const matches = suppliedBuf.length === expectedBuf.length && crypto.timingSafeEqual(suppliedBuf, expectedBuf);
+  if (!matches) {
+    return res.redirect('/admin/login?error=1');
+  }
+  res.cookie(SESSION_COOKIE, makeSessionCookieValue(), {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: SESSION_MAX_AGE_MS,
+    path: '/'
+  });
+  res.redirect('/admin');
+});
+
+app.post('/admin/logout', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+  res.redirect('/admin/login');
+});
 
 app.get(['/admin', '/admin.html'], requireDashboardAuth, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));

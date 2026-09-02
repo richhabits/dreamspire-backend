@@ -47,6 +47,8 @@
     position: sticky;
     top: 0;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
   }
   .sidebar-logo {
     display: flex;
@@ -239,6 +241,9 @@
     <div class="nav-item" data-view="fulfillment" onclick="switchView('fulfillment', this)"><span class="nav-icon">🚚</span> Fulfillment</div>
     <div class="nav-item" data-view="discounts" onclick="switchView('discounts', this)"><span class="nav-icon">🏷️</span> Discounts</div>
     <div class="nav-item" data-view="store" onclick="switchView('store', this)"><span class="nav-icon">⚙️</span> Store</div>
+    <form method="POST" action="/admin/logout" style="margin-top: auto; padding-top: 12px;">
+      <button type="submit" class="nav-item" style="width:100%; text-align:left; background:none; border:none; font:inherit; cursor:pointer;"><span class="nav-icon">↪️</span> Sign out</button>
+    </form>
   </aside>
 
   <main class="main">
@@ -566,7 +571,7 @@
   }
 
   function showAuthExpired(mountId) {
-    document.getElementById(mountId).innerHTML = '<div class="empty-state">Session expired — <a href="" onclick="location.reload()">reload the page</a> and sign in again.</div>';
+    document.getElementById(mountId).innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>';
   }
 
   async function loadOrders() {
@@ -689,7 +694,7 @@
         </div>
       `).join('');
     } catch (err) {
-      if (err.message === 'AUTH') { mount.innerHTML = '<div class="empty-state">Session expired — <a href="" onclick="location.reload()">reload the page</a> and sign in again.</div>'; return; }
+      if (err.message === 'AUTH') { mount.innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>'; return; }
       mount.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
     }
   }
