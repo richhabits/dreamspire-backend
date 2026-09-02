@@ -32,6 +32,14 @@ app.get(['/admin', '/admin.html'], requireDashboardAuth, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
+// Every endpoint that can return real order/customer/shop data must sit
+// behind the same password gate as the dashboard itself -- these were
+// previously reachable unauthenticated even though /admin was protected.
+app.use('/api/shopify/orders', requireDashboardAuth);
+app.use('/api/shopify/products', requireDashboardAuth);
+app.use('/api/shopify/shop', requireDashboardAuth);
+app.use('/api/fulfillment/status', requireDashboardAuth);
+
 const PORT = process.env.PORT || 4000;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_URL || "anznev-5s.myshopify.com";
 
@@ -49,11 +57,11 @@ app.get('/api/health', (req, res) => {
     port: PORT,
     timestamp: new Date().toISOString(),
     stakeholders: {
-      shopify: `CONNECTED (${SHOPIFY_DOMAIN})`,
+      shopify: (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN && process.env.SHOPIFY_ADMIN_ACCESS_TOKEN !== 'shpat_demo_token_12345') ? `CONFIGURED (${SHOPIFY_DOMAIN})` : "NOT_CONNECTED",
       fulfillment: "See /api/fulfillment/status — routing is native to Shopify, not a custom API key",
-      stripe: process.env.STRIPE_SECRET_KEY ? "SECURE" : "CONFIGURED",
-      anthropic: (process.env.ANTHROPIC_API_KEY || '').includes('demo') ? "DEMO & FREE ROTATION ACTIVE" : "SECURE",
-      google: "SYNCED (GA4 / Merchant Center)"
+      stripe: (process.env.STRIPE_SECRET_KEY && !process.env.STRIPE_SECRET_KEY.includes('demo') && !process.env.STRIPE_SECRET_KEY.includes('YOUR_PROD')) ? "CONFIGURED" : "NOT_CONNECTED",
+      anthropic: (process.env.ANTHROPIC_API_KEY || '').includes('demo') ? "DEMO & FREE ROTATION ACTIVE" : "CONFIGURED",
+      google_merchant_feed: "LIVE — see /api/google/feed.xml (generated from real Shopify catalog)"
     }
   });
 });
@@ -159,27 +167,21 @@ app.get('/api/google/feed.xml', async (req, res) => {
 });
 
 // 3. Shopify Admin API - Generate Single-Use Discount Price Rule
-app.post('/api/shopify/discount', async (req, res) => {
-  const { code, value, type, email } = req.body;
+// Note: requires a `write_discounts` scope this app does not currently
+// have, and Shopify's legacy Price Rules REST endpoint is deprecated in
+// favor of the GraphQL discountCodeBasicCreate mutation. Left in place for
+// future real use, but it must report failure honestly rather than fake it.
+app.post('/api/shopify/discount', requireDashboardAuth, async (req, res) => {
+  const { code, value } = req.body;
   const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 
-  // Format code with brand prefix
-  const generatedCode = code || (type === 'youth_pass' ? `YOUTH16-${Math.floor(1000 + Math.random() * 9000)}` : `SECURED-${Math.floor(1000 + Math.random() * 9000)}`);
-
   if (!token || token === 'shpat_demo_token_12345') {
-    return res.json({
-      status: "SUCCESS",
-      code: generatedCode,
-      discount_percentage: value || 15,
-      scope: "ALL_PRODUCTS",
-      expires_in: "24_HOURS",
-      message: "Generated 15% VIP Allocation Code (Ready for Shopify Checkout)"
-    });
+    return res.json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
   }
 
+  const generatedCode = code || `SECURED-${Math.floor(1000 + Math.random() * 9000)}`;
+
   try {
-    // Using native Node 18+ global fetch
-    // Live Shopify Admin GraphQL / REST Price Rule Creation
     const ruleRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/price_rules.json`, {
       method: 'POST',
       headers: {
@@ -199,14 +201,15 @@ app.post('/api/shopify/discount', async (req, res) => {
         }
       })
     });
-    
+
     if (ruleRes.ok) {
       const ruleData = await ruleRes.json();
       return res.json({ status: "SUCCESS", code: generatedCode, price_rule_id: ruleData.price_rule.id });
     }
-    return res.json({ status: "SUCCESS", code: generatedCode, message: "Fallback generated" });
+    const errBody = await ruleRes.text();
+    return res.status(ruleRes.status).json({ status: "ERROR", message: `Shopify rejected the request (${ruleRes.status}): ${errBody}` });
   } catch (error) {
-    res.json({ status: "SUCCESS", code: generatedCode, error: error.message });
+    res.status(500).json({ status: "ERROR", message: error.message });
   }
 });
 
@@ -224,21 +227,107 @@ app.get('/api/shopify/orders', async (req, res) => {
 
   try {
     // Using native Node 18+ global fetch
-    const ordersRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=any&limit=10`, {
-      headers: { 'X-Shopify-Access-Token': token }
-    });
+    const [ordersRes, countRes] = await Promise.all([
+      fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders.json?status=any&limit=50`, {
+        headers: { 'X-Shopify-Access-Token': token }
+      }),
+      fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/orders/count.json?status=any`, {
+        headers: { 'X-Shopify-Access-Token': token }
+      })
+    ]);
     const ordersData = await ordersRes.json();
+    const countData = await countRes.json();
     const mapped = (ordersData.orders || []).map(o => ({
       id: o.name,
+      order_id: o.id,
       name: [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(' ') || 'Guest',
-      total: `£${o.total_price}`,
+      total: parseFloat(o.total_price || '0'),
+      currency: o.currency || 'GBP',
       status: o.cancelled_at ? 'Cancelled' : (o.financial_status || 'unknown'),
       items: (o.line_items || []).reduce((n, li) => n + (li.quantity || 0), 0),
-      routed_to: o.fulfillment_status || 'Unfulfilled'
+      routed_to: o.fulfillment_status || 'unfulfilled',
+      created_at: o.created_at
     }));
-    return res.json({ status: "SUCCESS", orders: mapped });
+    return res.json({ status: "SUCCESS", orders: mapped, total_count: countData.count ?? mapped.length });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.1 Shopify Admin API - Real Product Catalog (Admin-level: includes
+// draft/inventory data, not just what's publicly visible on the storefront).
+// Replaces the old client-side fetch of a static real-shopify-products.json
+// file that was written to a path outside this repo and never actually
+// existed in the deployed backend -- the catalog view was silently broken.
+app.get('/api/shopify/products', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({
+      status: "NOT_CONNECTED",
+      products: [],
+      message: "No live Shopify Admin API token configured. Set SHOPIFY_ADMIN_ACCESS_TOKEN to enable the real catalog."
+    });
+  }
+
+  try {
+    const productsRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/products.json?limit=100`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const data = await productsRes.json();
+    const mapped = (data.products || []).map(p => {
+      const variants = p.variants || [];
+      const cheapest = variants.reduce((min, v) => {
+        const price = parseFloat(v.price || '0');
+        return min === null || price < min ? price : min;
+      }, null);
+      const totalInventory = variants.reduce((n, v) => n + (typeof v.inventory_quantity === 'number' ? v.inventory_quantity : 0), 0);
+      return {
+        id: p.id,
+        title: p.title,
+        handle: p.handle,
+        status: p.status,
+        image: (p.image && p.image.src) || (p.images && p.images[0] && p.images[0].src) || '',
+        price: cheapest === null ? '0.00' : cheapest.toFixed(2),
+        variant_count: variants.length,
+        inventory: totalInventory
+      };
+    });
+    return res.json({ status: "SUCCESS", products: mapped });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.2 Shopify Admin API - Real Store Info
+app.get('/api/shopify/shop', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({ status: "NOT_CONNECTED", shop: null });
+  }
+
+  try {
+    const shopRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': token }
+    });
+    const data = await shopRes.json();
+    const s = data.shop || {};
+    return res.json({
+      status: "SUCCESS",
+      shop: {
+        name: s.name,
+        domain: s.domain,
+        myshopify_domain: s.myshopify_domain,
+        email: s.email,
+        currency: s.currency,
+        plan_name: s.plan_display_name,
+        country: s.country_name,
+        created_at: s.created_at
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
   }
 });
 
@@ -273,30 +362,22 @@ app.post('/api/printful/order', async (req, res) => {
 });
 
 // 7. Universal Social Publisher API
-app.post('/api/social/publish', async (req, res) => {
-  const { networks, campaign } = req.body;
-  const activeNetworks = networks && networks.length ? networks : ['TikTok Shop', 'Snapchat AR', 'IG Reels'];
-  res.json({
-    status: "SUCCESS",
-    campaign: campaign || "Drop 001 Archive Release",
-    networks: activeNetworks,
-    reach_estimate: "1.45M Target Gen-Z Impressions",
-    status_timestamp: new Date().toISOString(),
-    message: `OAuth verified. Campaign successfully pushed to: ${activeNetworks.join(', ')}.`
+// No real TikTok Shop / Instagram / Snapchat publishing integration exists
+// (no OAuth app registered with any of these platforms). This previously
+// always returned a fabricated "SUCCESS" with a made-up reach estimate --
+// removed. Build real platform OAuth + posting before re-enabling this.
+app.post('/api/social/publish', (req, res) => {
+  res.status(501).json({
+    status: "NOT_IMPLEMENTED",
+    message: "No real social publishing integration exists yet. Each platform (TikTok Shop, Instagram, Snapchat) requires its own OAuth app and business API approval before this can post for real."
   });
 });
 
 // 8. Stripe Balance & Account Inspection
-app.get('/api/stripe/balance', async (req, res) => {
-  if (!stripe || (process.env.STRIPE_SECRET_KEY || '').includes('demo') || (process.env.STRIPE_SECRET_KEY || '').includes('placeholder')) {
-    return res.json({
-      status: "CONFIGURED",
-      available_gbp: "4,820.00",
-      pending_gbp: "680.00",
-      currency: "GBP",
-      payout_schedule: "Daily Rolling (2-day settlement)",
-      message: "Stripe Connect Ledger Active. Live API Key will stream real-time account balances."
-    });
+app.get('/api/stripe/balance', requireDashboardAuth, async (req, res) => {
+  const key = process.env.STRIPE_SECRET_KEY || '';
+  if (!stripe || key.includes('demo') || key.includes('placeholder') || key.includes('YOUR_PROD')) {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Stripe secret key configured." });
   }
 
   try {
@@ -304,64 +385,41 @@ app.get('/api/stripe/balance', async (req, res) => {
     const gbpAvailable = balance.available.find(b => b.currency.toLowerCase() === 'gbp')?.amount || 0;
     const gbpPending = balance.pending.find(b => b.currency.toLowerCase() === 'gbp')?.amount || 0;
     res.json({
-      status: "LIVE_CONNECTED",
+      status: "SUCCESS",
       available_gbp: (gbpAvailable / 100).toFixed(2),
       pending_gbp: (gbpPending / 100).toFixed(2),
-      currency: "GBP",
-      raw: balance
+      currency: "GBP"
     });
   } catch (err) {
-    res.json({
-      status: "FALLBACK_ACTIVE",
-      available_gbp: "4,820.00",
-      pending_gbp: "680.00",
-      currency: "GBP",
-      payout_schedule: "Daily Rolling (2-day settlement)",
-      message: `Stripe Ledger Active (${err.message})`
-    });
+    res.status(500).json({ status: "ERROR", message: err.message });
   }
 });
 
 // 8.1 Stripe Connect Creator Payout Engine
-app.post('/api/stripe/payout', async (req, res) => {
-  const { creatorId, amount, destinationAccount } = req.body;
-  const payoutAmount = parseFloat(amount || "124.50");
-  const txnId = `txn_${Math.floor(100000000 + Math.random() * 900000000)}`;
-
-  if (stripe && destinationAccount && !process.env.STRIPE_SECRET_KEY.includes('demo')) {
-    try {
-      const transfer = await stripe.transfers.create({
-        amount: Math.round(payoutAmount * 100),
-        currency: 'gbp',
-        destination: destinationAccount,
-        description: `DreamSpire 15% Creator Commission - ${creatorId || 'VIP'}`
-      });
-      return res.json({
-        status: "SUCCESS",
-        transfer_id: transfer.id,
-        amount_gbp: payoutAmount.toFixed(2),
-        destination: destinationAccount,
-        message: `Live transfer of £${payoutAmount.toFixed(2)} completed via Stripe Connect.`
-      });
-    } catch (err) {
-      return res.json({
-        status: "SUCCESS",
-        fallback: true,
-        transaction_id: txnId,
-        amount_gbp: payoutAmount.toFixed(2),
-        message: `Simulated Connect Payout: ${err.message}`
-      });
-    }
+// No creator affiliate program is actually built (no Stripe Connect
+// onboarding flow exists), so there is no real destination account to pay
+// out to. This previously fabricated a "successful transfer" with a fake
+// transaction ID whenever no real account was supplied -- removed.
+app.post('/api/stripe/payout', requireDashboardAuth, async (req, res) => {
+  const { amount, destinationAccount } = req.body;
+  const key = process.env.STRIPE_SECRET_KEY || '';
+  if (!stripe || key.includes('demo') || key.includes('placeholder') || key.includes('YOUR_PROD') || !destinationAccount) {
+    return res.status(400).json({
+      status: "NOT_CONNECTED",
+      message: "No real Stripe Connect destination account was provided. No creator payout system is built yet — this must never report a fake success."
+    });
   }
 
-  res.json({
-    status: "SUCCESS",
-    creator_id: creatorId || "CR-UK-0842",
-    amount_gbp: payoutAmount.toFixed(2),
-    fee_rate: "15% Cost-Per-Sale Commission",
-    transaction_id: txnId,
-    message: `Commission £${payoutAmount.toFixed(2)} successfully transferred to Creator ${creatorId || 'CR-UK-0842'} via Stripe Connect Instant Payout.`
-  });
+  try {
+    const transfer = await stripe.transfers.create({
+      amount: Math.round(parseFloat(amount || '0') * 100),
+      currency: 'gbp',
+      destination: destinationAccount
+    });
+    res.json({ status: "SUCCESS", transfer_id: transfer.id });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
 });
 
 // 8.2 Stripe Direct Universal Checkout Generator
@@ -423,13 +481,12 @@ app.post('/api/stripe/create-checkout', async (req, res) => {
 });
 
 // 8.5 Retention Engine (ZPD Klaviyo/SMS Sync)
-app.post('/api/marketing/sync', async (req, res) => {
-  const { email, phone, zpd } = req.body;
-  // Simulate pushing Zero-Party Data to an external marketing CRM (e.g. Klaviyo)
-  res.json({
-    status: "SUCCESS",
-    message: `Successfully synced ZPD profile for ${email || phone}. SMS/Email pipeline updated with sizing and fit preferences.`,
-    zpd_synced: zpd || {}
+// No real marketing CRM (e.g. Klaviyo) is connected -- this previously
+// always claimed a successful sync regardless. Removed the fake success.
+app.post('/api/marketing/sync', (req, res) => {
+  res.status(501).json({
+    status: "NOT_IMPLEMENTED",
+    message: "No real marketing CRM integration exists yet (e.g. Klaviyo API key + list sync)."
   });
 });
 
@@ -508,7 +565,7 @@ app.post('/api/ai/chat', async (req, res) => {
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
     console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
-    console.log(`Endpoints active: /api/health, /api/google/feed.xml, /api/shopify/discount, /api/shopify/orders, /api/tapstitch/order, /api/printful/order, /api/social/publish, /api/stripe/payout, /api/ai/chat`);
+    console.log(`Endpoints active: /api/health, /api/google/feed.xml, /api/shopify/orders, /api/shopify/products, /api/shopify/shop, /api/fulfillment/status, /api/shopify/discount, /api/tapstitch/order, /api/printful/order, /api/ai/chat`);
   });
 }
 
