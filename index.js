@@ -138,6 +138,10 @@ app.post('/admin/logout', (req, res) => {
 });
 
 app.get(['/admin', '/admin.html'], requireDashboardAuth, (req, res) => {
+  // Force revalidation on every load -- otherwise a browser can keep
+  // serving a stale cached copy of the dashboard after a deploy until
+  // the user manually hard-refreshes.
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
