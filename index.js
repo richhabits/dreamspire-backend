@@ -1213,14 +1213,110 @@ app.post('/api/stripe/create-checkout', async (req, res) => {
   }
 });
 
-// 8.5 Retention Engine (ZPD Klaviyo/SMS Sync)
-// No real marketing CRM (e.g. Klaviyo) is connected -- this previously
-// always claimed a successful sync regardless. Removed the fake success.
-app.post('/api/marketing/sync', (req, res) => {
-  res.status(501).json({
-    status: "NOT_IMPLEMENTED",
-    message: "No real marketing CRM integration exists yet (e.g. Klaviyo API key + list sync)."
+// 8.5 VIP Archive email capture (retention-opt-in.liquid on the live
+// storefront calls this). No Klaviyo/SMS CRM is connected, but Shopify's
+// own Customers list IS a real, immediately useful place for this: creates
+// or updates a real Shopify customer with real, explicit marketing consent
+// (the shopper just submitted this form themselves -- single opt-in is the
+// correct, honest consent level, not a lie about "syncing" to nothing).
+async function findShopifyCustomerByEmail(token, email) {
+  const searchRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/search.json?query=${encodeURIComponent('email:' + email)}`, {
+    headers: { 'X-Shopify-Access-Token': token }
   });
+  const searchData = await searchRes.json();
+  return (searchData.customers || [])[0] || null;
+}
+
+// Shopify's customer search index is eventually-consistent -- measured
+// live at ~4.5s to catch up after a write. Only called after Shopify's own
+// "email already taken" conflict has already told us authoritatively that
+// the customer exists; this just waits for search to be able to find them.
+async function findShopifyCustomerByEmailWithRetry(token, email, maxAttempts = 8, delayMs = 700) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const found = await findShopifyCustomerByEmail(token, email);
+    if (found) return found;
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  return null;
+}
+
+function buildVipCustomerPayload({ email, phone, zpd, existing }) {
+  const zpdNote = (zpd && (zpd.height || zpd.fit || zpd.color))
+    ? `VIP Archive sizing profile — height: ${zpd.height || 'n/a'}, fit: ${zpd.fit || 'n/a'}, color: ${zpd.color || 'n/a'}`
+    : null;
+  const existingTags = existing?.tags ? existing.tags.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const tags = Array.from(new Set([...existingTags, 'VIP-Archive'])).join(', ');
+
+  const payload = { tags };
+  if (email) payload.email = email;
+  if (phone) payload.phone = phone;
+  if (zpdNote) payload.note = existing?.note ? `${existing.note}\n${zpdNote}` : zpdNote;
+  if (email) {
+    payload.email_marketing_consent = {
+      state: 'subscribed',
+      opt_in_level: 'single_opt_in',
+      consent_updated_at: new Date().toISOString()
+    };
+  }
+  return payload;
+}
+
+app.post('/api/marketing/sync', async (req, res) => {
+  const { email, phone, zpd } = req.body || {};
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+
+  if (!email && !phone) {
+    return res.status(400).json({ status: "ERROR", message: "Email or phone is required." });
+  }
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.status(503).json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+
+  try {
+    let existing = email ? await findShopifyCustomerByEmail(token, email) : null;
+
+    let custRes = existing
+      ? await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${existing.id}.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+          body: JSON.stringify({ customer: { id: existing.id, ...buildVipCustomerPayload({ email, phone, zpd, existing }) } })
+        })
+      : await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers.json`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+          body: JSON.stringify({ customer: buildVipCustomerPayload({ email, phone, zpd, existing: null }) })
+        });
+
+    // Shopify's customer search index can briefly lag a very recent write
+    // (same lag seen with discount codes elsewhere in this file) -- a rapid
+    // resubmit can miss finding the customer that was JUST created above.
+    // Shopify's own "email already taken" conflict is immediate and
+    // authoritative, so treat that as the reliable signal to retry as an
+    // update instead of failing the shopper's real submission.
+    if (!custRes.ok && !existing && custRes.status === 422) {
+      const errBody = await custRes.clone().json().catch(() => null);
+      const emailTaken = errBody?.errors?.email?.some(m => /taken/i.test(m));
+      if (emailTaken && email) {
+        existing = await findShopifyCustomerByEmailWithRetry(token, email);
+        if (existing) {
+          custRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${existing.id}.json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+            body: JSON.stringify({ customer: { id: existing.id, ...buildVipCustomerPayload({ email, phone, zpd, existing }) } })
+          });
+        }
+      }
+    }
+
+    if (!custRes.ok) {
+      const errBody = await custRes.text();
+      return res.status(custRes.status).json({ status: "ERROR", message: `Shopify rejected the sync (${custRes.status}): ${errBody}` });
+    }
+    const custData = await custRes.json();
+    return res.json({ status: "SUCCESS", customer_id: custData.customer?.id });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
 });
 
 // 9. Secure AI Chat Proxy (Anthropic SDK + Free Multi-Model Engine)
