@@ -154,14 +154,10 @@ app.get('/api/shopify/orders', async (req, res) => {
   const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
   
   if (!token || token === 'shpat_demo_token_12345') {
-    return res.json({ 
-      status: "SUCCESS", 
-      orders: [
-        { id: "#DS-8925", name: "Kofi Mensah", total: "£135.00", status: "Paid", items: 2, courier: "Royal Mail Tracked 24", routed_to: "Tapstitch 500GSM" },
-        { id: "#DS-8924", name: "Romeo Valentine", total: "£142.50", status: "Paid", items: 2, courier: "DHL Express DDP", routed_to: "Tapstitch 500GSM" },
-        { id: "#DS-8923", name: "Elena Vance", total: "£85.00", status: "Paid", items: 1, courier: "Royal Mail Tracked 24", routed_to: "Tapstitch 500GSM" },
-        { id: "#DS-8922", name: "Marcus Sterling", total: "£45.00", status: "Dispatched", items: 1, courier: "Royal Mail 24", routed_to: "Printful v2" }
-      ]
+    return res.json({
+      status: "NOT_CONNECTED",
+      orders: [],
+      message: "No live Shopify Admin API token configured. Set SHOPIFY_ADMIN_ACCESS_TOKEN to enable real order sync."
     });
   }
 
@@ -171,7 +167,15 @@ app.get('/api/shopify/orders', async (req, res) => {
       headers: { 'X-Shopify-Access-Token': token }
     });
     const ordersData = await ordersRes.json();
-    return res.json({ status: "SUCCESS", orders: ordersData.orders || [] });
+    const mapped = (ordersData.orders || []).map(o => ({
+      id: o.name,
+      name: [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(' ') || 'Guest',
+      total: `£${o.total_price}`,
+      status: o.cancelled_at ? 'Cancelled' : (o.financial_status || 'unknown'),
+      items: (o.line_items || []).reduce((n, li) => n + (li.quantity || 0), 0),
+      routed_to: o.fulfillment_status || 'Unfulfilled'
+    }));
+    return res.json({ status: "SUCCESS", orders: mapped });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
