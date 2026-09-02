@@ -4,9 +4,33 @@ const cors = require('cors');
 const { Anthropic } = require('@anthropic-ai/sdk');
 const Stripe = require('stripe');
 
+const fs = require('fs');
+const path = require('path');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Password-gate the ops dashboard -- it will show real order/customer data
+// once SHOPIFY_ADMIN_ACCESS_TOKEN is set, so it must never be left open.
+function requireDashboardAuth(req, res, next) {
+  const configuredPassword = process.env.ADMIN_DASHBOARD_PASSWORD;
+  if (!configuredPassword) {
+    return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
+  }
+  const authHeader = req.headers.authorization || '';
+  const [scheme, encoded] = authHeader.split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const [, suppliedPassword] = Buffer.from(encoded, 'base64').toString().split(':');
+    if (suppliedPassword === configuredPassword) return next();
+  }
+  res.set('WWW-Authenticate', 'Basic realm="DreamSpire Ops"');
+  return res.status(401).send('Authentication required.');
+}
+
+app.get(['/admin', '/admin.html'], requireDashboardAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
 
 const PORT = process.env.PORT || 4000;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_URL || "anznev-5s.myshopify.com";
