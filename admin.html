@@ -76,8 +76,44 @@
   .nav-item.is-active { background: #e3f1ec; color: var(--accent-hover); font-weight: 600; }
   .nav-icon { font-size: 1rem; width: 18px; text-align: center; }
 
+  /* Any card panel that ends up holding a table scrolls horizontally
+     instead of squeezing columns or breaking the page layout. */
+  .card > div:has(> table) { overflow-x: auto; }
+  .card table { min-width: 640px; }
+
+  /* MOBILE TOP BAR (hidden on desktop) */
+  .mobile-topbar {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .mobile-topbar .sidebar-logo { padding: 0; margin: 0; }
+  .hamburger-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 38px;
+    height: 38px;
+    font-size: 1.1rem;
+    cursor: pointer;
+  }
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 199;
+  }
+  .sidebar-overlay.is-open { display: block; }
+
   /* MAIN */
-  .main { flex: 1; padding: 28px 36px; max-width: 1200px; }
+  .main { flex: 1; padding: 28px 36px; max-width: 1200px; min-width: 0; }
   .page-header {
     display: flex;
     justify-content: space-between;
@@ -266,11 +302,48 @@
     transform: translate(-50%, -110%);
     z-index: 10;
   }
+
+  /* RESPONSIVE: phones and small tablets */
+  @media (max-width: 860px) {
+    body { flex-direction: column; }
+    .mobile-topbar { display: flex; }
+    .sidebar {
+      position: fixed;
+      left: -260px;
+      top: 0;
+      height: 100vh;
+      width: 240px;
+      z-index: 200;
+      transition: left 0.2s ease;
+      box-shadow: 4px 0 20px rgba(0,0,0,0.15);
+    }
+    .sidebar.is-open { left: 0; }
+    .main { padding: 18px 14px; max-width: 100%; }
+    .page-title { font-size: 1.25rem; }
+    .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+    .kpi-value { font-size: 1.3rem; }
+    .card { margin-bottom: 16px; }
+    .action-row { flex-direction: column; gap: 4px; align-items: flex-start; }
+    .info-grid { grid-template-columns: 1fr; }
+    .search-input { max-width: 100%; }
+  }
+
+  @media (max-width: 480px) {
+    .kpi-grid { grid-template-columns: 1fr 1fr; }
+    .modal-box { padding: 18px; }
+  }
 </style>
 </head>
 <body>
 
-  <aside class="sidebar">
+  <div class="mobile-topbar">
+    <button class="hamburger-btn" onclick="toggleSidebar(true)" aria-label="Open menu">☰</button>
+    <div class="sidebar-logo"><span class="dot"></span> DreamSpire</div>
+    <div style="width:38px;"></div>
+  </div>
+  <div class="sidebar-overlay" id="SidebarOverlay" onclick="toggleSidebar(false)"></div>
+
+  <aside class="sidebar" id="Sidebar">
     <div class="sidebar-logo"><span class="dot"></span> DreamSpire</div>
     <div class="nav-item is-active" data-view="home" onclick="switchView('home', this)"><span class="nav-icon">🏠</span> Home</div>
     <div class="nav-item" data-view="orders" onclick="switchView('orders', this)"><span class="nav-icon">🧾</span> Orders</div>
@@ -547,6 +620,12 @@
     document.getElementById('view-' + viewId).classList.add('is-active');
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('is-active'));
     if (el) el.classList.add('is-active');
+    toggleSidebar(false); // no-op on desktop; closes the drawer after picking a page on mobile
+  }
+
+  function toggleSidebar(open) {
+    document.getElementById('Sidebar').classList.toggle('is-open', open);
+    document.getElementById('SidebarOverlay').classList.toggle('is-open', open);
   }
 
   function money(n, currency) {
