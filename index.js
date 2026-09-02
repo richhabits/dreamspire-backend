@@ -1137,60 +1137,79 @@ app.post('/api/stripe/payout', requireDashboardAuth, async (req, res) => {
 });
 
 // 8.2 Stripe Direct Universal Checkout Generator
+// SECURITY: price is never taken from the client. The old version trusted
+// a client-supplied `price` per item straight into the real Stripe charge
+// amount -- anyone could open devtools and buy a £95 hoodie for £0.01. Every
+// item must now carry a real Shopify variant_id; the actual current price
+// is looked up server-side from Shopify's own Admin API and that is what
+// gets charged. If a variant can't be verified, the request is rejected --
+// it never falls back to trusting whatever the client sent.
+//
+// This also removes the old fake-session fallback (a `cs_live_...` id that
+// didn't correspond to any real Stripe session, returned as "SUCCESS" with
+// a checkout_url that would 404) -- reports NOT_CONNECTED/ERROR honestly
+// instead, consistent with the rest of this codebase.
 app.post('/api/stripe/create-checkout', async (req, res) => {
   const { items, customerEmail, successUrl, cancelUrl } = req.body;
-  const mockSessionId = `cs_live_${Math.floor(100000000 + Math.random() * 900000000)}`;
+  const stripeKey = process.env.STRIPE_SECRET_KEY || '';
 
-  if (!stripe || (process.env.STRIPE_SECRET_KEY || '').includes('demo')) {
-    return res.json({
-      status: "SUCCESS",
-      session_id: mockSessionId,
-      checkout_url: `https://checkout.stripe.com/c/pay/${mockSessionId}`,
-      message: "Generated direct Stripe Checkout session for instant Apple Pay / Card processing."
-    });
+  if (!stripe || stripeKey.includes('demo') || stripeKey.includes('placeholder') || stripeKey.includes('YOUR_PROD')) {
+    return res.json({ status: "NOT_CONNECTED", message: "No live Stripe secret key configured." });
+  }
+
+  const shopifyToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  if (!shopifyToken || shopifyToken === 'shpat_demo_token_12345') {
+    return res.status(503).json({ status: "ERROR", message: "Cannot verify real product prices — no live Shopify Admin API token configured." });
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ status: "ERROR", message: "At least one item is required." });
   }
 
   try {
-    const lineItems = (items || []).map(i => ({
-      price_data: {
-        currency: 'gbp',
-        product_data: {
-          name: i.title || 'DreamSpire Archive Piece',
-          images: i.image ? [i.image] : []
+    const lineItems = [];
+    for (const item of items) {
+      const variantId = item.variant_id;
+      if (!variantId) {
+        return res.status(400).json({ status: "ERROR", message: "Each item requires a real Shopify variant_id — price is never accepted from the client." });
+      }
+      const quantity = Math.max(1, parseInt(item.quantity, 10) || 1);
+
+      const vRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/variants/${variantId}.json`, {
+        headers: { 'X-Shopify-Access-Token': shopifyToken }
+      });
+      if (!vRes.ok) {
+        return res.status(400).json({ status: "ERROR", message: `Variant ${variantId} could not be verified against Shopify.` });
+      }
+      const variant = (await vRes.json()).variant;
+      if (!variant || !variant.price) {
+        return res.status(400).json({ status: "ERROR", message: `Variant ${variantId} not found.` });
+      }
+
+      lineItems.push({
+        price_data: {
+          currency: 'gbp',
+          product_data: {
+            name: (variant.title && variant.title !== 'Default Title') ? variant.title : `DreamSpire item ${variant.sku || variantId}`
+          },
+          unit_amount: Math.round(parseFloat(variant.price) * 100)
         },
-        unit_amount: Math.round((i.price || 45) * 100)
-      },
-      quantity: i.quantity || 1
-    }));
+        quantity
+      });
+    }
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: lineItems.length ? lineItems : [{
-        price_data: {
-          currency: 'gbp',
-          product_data: { name: 'DreamSpire 500GSM Custom Archive Piece' },
-          unit_amount: 6500
-        },
-        quantity: 1
-      }],
+      line_items: lineItems,
       mode: 'payment',
       customer_email: customerEmail || undefined,
       success_url: successUrl || `https://${SHOPIFY_DOMAIN}/pages/order-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: cancelUrl || `https://${SHOPIFY_DOMAIN}/cart`
     });
 
-    res.json({
-      status: "SUCCESS",
-      session_id: session.id,
-      checkout_url: session.url
-    });
+    res.json({ status: "SUCCESS", session_id: session.id, checkout_url: session.url });
   } catch (err) {
-    res.json({
-      status: "SUCCESS",
-      session_id: mockSessionId,
-      checkout_url: `https://checkout.stripe.com/c/pay/${mockSessionId}`,
-      message: `Generated fallback Stripe session (${err.message})`
-    });
+    res.status(500).json({ status: "ERROR", message: err.message });
   }
 });
 
