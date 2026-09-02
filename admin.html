@@ -628,6 +628,29 @@
     document.getElementById('SidebarOverlay').classList.toggle('is-open', open);
   }
 
+  // Order customer names, notes, product titles, tracking info etc. are all
+  // real free-text data from Shopify (anyone placing an order controls their
+  // own name/note) and get rendered via innerHTML throughout this file --
+  // every such value must be escaped or this is a stored-XSS hole into an
+  // authenticated admin session.
+  function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  // For href/src attributes specifically: escapes for HTML AND blocks
+  // javascript:/data: URIs, since escapeHtml alone doesn't stop those.
+  function safeUrl(value) {
+    const v = String(value || '').trim();
+    if (!/^https?:\/\//i.test(v)) return '';
+    return escapeHtml(v);
+  }
+
   function money(n, currency) {
     const c = currency || 'GBP';
     const symbol = c === 'GBP' ? '£' : (c === 'USD' ? '$' : (c === 'EUR' ? '€' : c + ' '));
@@ -734,8 +757,8 @@
     }
     const rows = (limit ? orders.slice(0, limit) : orders).map(o => `
       <tr class="clickable-row" onclick="handleOrderRowClick(event, '${o.order_id}')">
-        <td><strong>${o.id}</strong></td>
-        <td>${o.name}</td>
+        <td><strong>${escapeHtml(o.id)}</strong></td>
+        <td>${escapeHtml(o.name)}</td>
         <td>${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
         <td>${money(o.total, o.currency)}</td>
         <td>${statusBadge(o.status)}</td>
@@ -800,14 +823,14 @@
       const addrLines = addr ? [addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country].filter(Boolean) : [];
       const items = o.line_items.map(li => `
         <tr>
-          <td><strong>${li.title}</strong>${li.variant_title ? `<br><span class="muted" style="font-size:0.78rem;">${li.variant_title}</span>` : ''}</td>
+          <td><strong>${escapeHtml(li.title)}</strong>${li.variant_title ? `<br><span class="muted" style="font-size:0.78rem;">${escapeHtml(li.variant_title)}</span>` : ''}</td>
           <td>${li.quantity}</td>
           <td>${money(li.price, o.currency)}</td>
         </tr>
       `).join('');
       document.getElementById('OrderDetailBody').innerHTML = `
         <div style="display:flex; gap:16px; margin-bottom:16px; font-size:0.85rem;">
-          <div><span class="muted">Customer</span><br><strong>${o.customer_name}</strong>${o.email ? `<br>${o.email}` : ''}</div>
+          <div><span class="muted">Customer</span><br><strong>${escapeHtml(o.customer_name)}</strong>${o.email ? `<br>${escapeHtml(o.email)}` : ''}</div>
           <div><span class="muted">Placed</span><br><strong>${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</strong></div>
         </div>
         <table style="margin-bottom:14px;">
@@ -817,8 +840,8 @@
         <div style="font-size:0.85rem; display:flex; justify-content:space-between; padding: 4px 0;"><span class="muted">Subtotal</span><span>${money(o.subtotal, o.currency)}</span></div>
         <div style="font-size:0.85rem; display:flex; justify-content:space-between; padding: 4px 0;"><span class="muted">Shipping</span><span>${money(o.shipping, o.currency)}</span></div>
         <div style="font-size:0.9rem; font-weight:700; display:flex; justify-content:space-between; padding: 6px 0; border-top:1px solid var(--border); margin-top:4px;"><span>Total</span><span>${money(o.total, o.currency)}</span></div>
-        ${addrLines.length ? `<div style="margin-top:16px; font-size:0.85rem;"><span class="muted">Shipping to</span><br>${addrLines.join(', ')}</div>` : ''}
-        ${o.note ? `<div style="margin-top:12px; font-size:0.85rem;"><span class="muted">Note</span><br>${o.note}</div>` : ''}
+        ${addrLines.length ? `<div style="margin-top:16px; font-size:0.85rem;"><span class="muted">Shipping to</span><br>${escapeHtml(addrLines.join(', '))}</div>` : ''}
+        ${o.note ? `<div style="margin-top:12px; font-size:0.85rem;"><span class="muted">Note</span><br>${escapeHtml(o.note)}</div>` : ''}
       `;
     } catch (err) {
       document.getElementById('OrderDetailBody').innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
@@ -865,9 +888,9 @@
     }
     const rows = products.map(p => `
       <tr>
-        <td>${p.image ? `<img class="thumb" src="${p.image}" onerror="this.style.display='none'">` : `<div class="thumb"></div>`}</td>
-        <td><strong>${p.title}</strong><br><span class="muted" style="font-size:0.78rem;">${p.handle}</span></td>
-        <td>${p.status === 'active' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${p.status}</span>`}</td>
+        <td>${p.image ? `<img class="thumb" src="${safeUrl(p.image)}" onerror="this.style.display='none'">` : `<div class="thumb"></div>`}</td>
+        <td><strong>${escapeHtml(p.title)}</strong><br><span class="muted" style="font-size:0.78rem;">${escapeHtml(p.handle)}</span></td>
+        <td>${p.status === 'active' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${escapeHtml(p.status)}</span>`}</td>
         <td>£${p.price}</td>
         <td>${p.variant_count}</td>
         <td>${p.inventory}</td>
@@ -958,9 +981,9 @@
       }
       mount.innerHTML = data.services.map(s => `
         <div class="kpi-card">
-          <div class="kpi-label">${s.name}</div>
+          <div class="kpi-label">${escapeHtml(s.name)}</div>
           <div class="kpi-value" style="font-size:1.1rem;"><span class="badge success">Connected</span></div>
-          <div class="muted" style="font-size:0.75rem; margin-top:6px; word-break:break-all;">${s.callbackUrl}</div>
+          <div class="muted" style="font-size:0.75rem; margin-top:6px; word-break:break-all;">${escapeHtml(s.callbackUrl)}</div>
         </div>
       `).join('');
     } catch (err) {
@@ -979,8 +1002,8 @@
       if (!data.locations || !data.locations.length) { wrap.innerHTML = '<div class="empty-state">No locations found.</div>'; return; }
       const rows = data.locations.map(l => `
         <tr>
-          <td><strong>${l.name}</strong></td>
-          <td>${l.country || '—'}</td>
+          <td><strong>${escapeHtml(l.name)}</strong></td>
+          <td>${escapeHtml(l.country) || '—'}</td>
           <td>${l.active ? '<span class="badge success">Active</span>' : '<span class="badge neutral">Inactive</span>'}</td>
         </tr>
       `).join('');
@@ -999,10 +1022,10 @@
       if (!data.fulfillments || !data.fulfillments.length) { wrap.innerHTML = '<div class="empty-state">No fulfillments yet.</div>'; return; }
       const rows = data.fulfillments.map(f => `
         <tr>
-          <td><strong>${f.order_id}</strong></td>
+          <td><strong>${escapeHtml(f.order_id)}</strong></td>
           <td>${new Date(f.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
-          <td>${f.tracking_company || '—'}</td>
-          <td>${f.tracking_url ? `<a href="${f.tracking_url}" target="_blank" rel="noopener">${f.tracking_number}</a>` : (f.tracking_number || '—')}</td>
+          <td>${escapeHtml(f.tracking_company) || '—'}</td>
+          <td>${safeUrl(f.tracking_url) ? `<a href="${safeUrl(f.tracking_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(f.tracking_number)}</a>` : (escapeHtml(f.tracking_number) || '—')}</td>
         </tr>
       `).join('');
       wrap.innerHTML = `<table><thead><tr><th>Order</th><th>Date</th><th>Carrier</th><th>Tracking</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -1024,13 +1047,13 @@
       document.getElementById('StoreDomainLabel').textContent = s.domain;
       wrap.innerHTML = `
         <div class="info-grid">
-          <div class="info-item"><div class="info-label">Store name</div><div class="info-value">${s.name}</div></div>
-          <div class="info-item"><div class="info-label">Domain</div><div class="info-value">${s.domain}</div></div>
-          <div class="info-item"><div class="info-label">Myshopify domain</div><div class="info-value">${s.myshopify_domain}</div></div>
-          <div class="info-item"><div class="info-label">Contact email</div><div class="info-value">${s.email}</div></div>
-          <div class="info-item"><div class="info-label">Currency</div><div class="info-value">${s.currency}</div></div>
-          <div class="info-item"><div class="info-label">Plan</div><div class="info-value">${s.plan_name}</div></div>
-          <div class="info-item"><div class="info-label">Country</div><div class="info-value">${s.country}</div></div>
+          <div class="info-item"><div class="info-label">Store name</div><div class="info-value">${escapeHtml(s.name)}</div></div>
+          <div class="info-item"><div class="info-label">Domain</div><div class="info-value">${escapeHtml(s.domain)}</div></div>
+          <div class="info-item"><div class="info-label">Myshopify domain</div><div class="info-value">${escapeHtml(s.myshopify_domain)}</div></div>
+          <div class="info-item"><div class="info-label">Contact email</div><div class="info-value">${escapeHtml(s.email)}</div></div>
+          <div class="info-item"><div class="info-label">Currency</div><div class="info-value">${escapeHtml(s.currency)}</div></div>
+          <div class="info-item"><div class="info-label">Plan</div><div class="info-value">${escapeHtml(s.plan_name)}</div></div>
+          <div class="info-item"><div class="info-label">Country</div><div class="info-value">${escapeHtml(s.country)}</div></div>
           <div class="info-item"><div class="info-label">Store created</div><div class="info-value">${new Date(s.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</div></div>
         </div>
       `;
@@ -1057,15 +1080,15 @@
         const isActive = d.status === 'ACTIVE';
         return `
         <tr>
-          <td><code>${d.code}</code></td>
-          <td>${d.title}</td>
+          <td><code>${escapeHtml(d.code)}</code></td>
+          <td>${escapeHtml(d.title)}</td>
           <td>${d.percentage ? d.percentage + '% off' : '—'}</td>
-          <td>${isActive ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${d.status}</span>`}</td>
+          <td>${isActive ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${escapeHtml(d.status)}</span>`}</td>
           <td>
             <div class="action-row">
               <button class="btn-link" onclick="openEditDiscount('${d.id}')">Edit</button>
               <button class="btn-link" onclick="toggleDiscount('${d.id}', ${!isActive})">${isActive ? 'Deactivate' : 'Activate'}</button>
-              <button class="btn-danger-link" onclick="deleteDiscount('${d.id}', '${d.code}')">Delete</button>
+              <button class="btn-danger-link" onclick="deleteDiscount('${d.id}')">Delete</button>
             </div>
           </td>
         </tr>
@@ -1123,8 +1146,9 @@
     }
   }
 
-  async function deleteDiscount(id, code) {
-    if (!confirm(`Permanently delete discount code "${code}"? This can't be undone.`)) return;
+  async function deleteDiscount(id) {
+    const d = discountsCache.find(x => x.id === id);
+    if (!confirm(`Permanently delete discount code "${d ? d.code : id}"? This can't be undone.`)) return;
     try {
       const data = await apiWrite('/api/shopify/discounts/delete', 'POST', { id });
       if (data.status !== 'SUCCESS') { alert('Could not delete: ' + (data.message || 'unknown error')); return; }
@@ -1164,10 +1188,10 @@
 
       const rows = data.customers.map(c => `
         <tr>
-          <td><strong>${c.name}</strong>${c.email ? `<br><span class="muted" style="font-size:0.78rem;">${c.email}</span>` : ''}</td>
+          <td><strong>${escapeHtml(c.name)}</strong>${c.email ? `<br><span class="muted" style="font-size:0.78rem;">${escapeHtml(c.email)}</span>` : ''}</td>
           <td>${c.orders_count}</td>
           <td>${money(c.total_spent)}</td>
-          <td>${c.state === 'enabled' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${c.state}</span>`}</td>
+          <td>${c.state === 'enabled' ? '<span class="badge success">Active</span>' : `<span class="badge neutral">${escapeHtml(c.state)}</span>`}</td>
         </tr>
       `).join('');
       wrap.innerHTML = `
@@ -1189,7 +1213,7 @@
       if (data.status !== 'SUCCESS' || !data.orders || !data.orders.length) { wrap.innerHTML = ''; return; }
       const rows = data.orders.map(o => `
         <div class="attention-row">
-          <span><strong>${o.id}</strong> · ${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+          <span><strong>${escapeHtml(o.id)}</strong> · ${new Date(o.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
           <span>${money(o.total, o.currency)}</span>
         </div>
       `).join('');
