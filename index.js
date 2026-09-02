@@ -26,13 +26,50 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     stakeholders: {
       shopify: `CONNECTED (${SHOPIFY_DOMAIN})`,
-      tapstitch: process.env.TAPSTITCH_API_KEY ? "SECURE" : "CONFIGURED",
-      printful: process.env.PRINTFUL_API_KEY ? "SECURE" : "CONFIGURED",
+      fulfillment: "See /api/fulfillment/status — routing is native to Shopify, not a custom API key",
       stripe: process.env.STRIPE_SECRET_KEY ? "SECURE" : "CONFIGURED",
       anthropic: (process.env.ANTHROPIC_API_KEY || '').includes('demo') ? "DEMO & FREE ROTATION ACTIVE" : "SECURE",
       google: "SYNCED (GA4 / Merchant Center)"
     }
   });
+});
+
+// 1.1 Real Fulfillment Routing Status
+// Printful and Tapstitch are connected as native Shopify fulfillment-service
+// apps (installed via OAuth in Shopify Admin), NOT via a custom API key in
+// this backend. Shopify itself dispatches orders to them and receives
+// tracking back via their own webhooks. This endpoint reports what Shopify
+// actually has registered, instead of guessing from an unrelated env var.
+app.get('/api/fulfillment/status', async (req, res) => {
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.json({
+      status: "NOT_CONNECTED",
+      services: [],
+      message: "No live Shopify Admin API token configured. Set SHOPIFY_ADMIN_ACCESS_TOKEN to check real fulfillment routing."
+    });
+  }
+
+  try {
+    const gqlRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token
+      },
+      body: JSON.stringify({
+        query: `query { shop { fulfillmentServices { serviceName handle callbackUrl } } }`
+      })
+    });
+    const gqlData = await gqlRes.json();
+    const services = (gqlData?.data?.shop?.fulfillmentServices || [])
+      .filter(s => s.handle !== 'manual')
+      .map(s => ({ name: s.serviceName, handle: s.handle, callbackUrl: s.callbackUrl, connected: true }));
+    return res.json({ status: "SUCCESS", services });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 2. Google Merchant Center XML Product Feed (Live XML Generation)
@@ -188,13 +225,13 @@ app.post('/api/tapstitch/order', async (req, res) => {
 
   const poNumber = `PO-TAP-${Math.floor(100000 + Math.random() * 900000)}`;
   res.json({
-    status: "SUCCESS",
+    status: "SIMULATED",
     po_number: poNumber,
     fabric_spec: "500 GSM French Terry Loopback Cotton",
     stitch_spec: "5-Thread Double Needle Coverstitch",
     custom_labels: "DS-DAMASK-SATIN-TAG-01",
     estimated_dispatch: "5-8 business days",
-    message: `Purchase order ${poNumber} queued on Tapstitch 500GSM milling line for ${quantity || 1}x ${product} (${size || 'L'}).`
+    message: `SIMULATION ONLY — no real PO was sent. Real Tapstitch orders route automatically through Shopify's own fulfillment-service connection once a customer checks out; this button does not call Tapstitch directly. (Preview PO: ${poNumber} for ${quantity || 1}x ${product}, ${size || 'L'})`
   });
 });
 
@@ -203,11 +240,11 @@ app.post('/api/printful/order', async (req, res) => {
   const { product, designFile } = req.body;
   const syncId = `PF-${Math.floor(100000 + Math.random() * 900000)}`;
   res.json({
-    status: "SUCCESS",
+    status: "SIMULATED",
     sync_id: syncId,
     embroidery_spec: "3D High-Density Puff Embroidery (14,000 stitches)",
     destination: "London Hub DDP",
-    message: `Printful API v2: 3D Puff Embroidery file verified and queued for ${product || 'DreamSpire Trucker'}.`
+    message: `SIMULATION ONLY — no real order was sent. Printful is already connected as a real Shopify fulfillment service and receives orders automatically at checkout; this button does not call Printful directly. (Preview sync: ${syncId} for ${product || 'DreamSpire Trucker'})`
   });
 });
 
