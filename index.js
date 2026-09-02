@@ -103,6 +103,33 @@ function requireDashboardAuth(req, res, next) {
   return res.status(401).json({ status: 'ERROR', message: 'Not signed in.' });
 }
 
+// Basic brute-force throttle on login attempts, keyed by IP. This is
+// in-memory, so on Vercel it only protects within one warm serverless
+// instance -- a cold start or a different region resets it. Real
+// protection here is the 20-char random password; this is a second,
+// honest-about-its-limits layer, not a guarantee.
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function tooManyLoginAttempts(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) return false;
+  return entry.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordLoginAttempt(ip, failed) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    loginAttempts.set(ip, { count: failed ? 1 : 0, resetAt: now + LOGIN_WINDOW_MS });
+    return;
+  }
+  if (failed) entry.count++;
+  else loginAttempts.delete(ip); // successful login clears the counter
+}
+
 app.get('/admin/login', (req, res) => {
   if (!process.env.ADMIN_DASHBOARD_PASSWORD) {
     return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
@@ -115,10 +142,15 @@ app.post('/admin/login', (req, res) => {
   if (!configuredPassword) {
     return res.status(503).send('Dashboard locked: ADMIN_DASHBOARD_PASSWORD is not set in Vercel env vars yet.');
   }
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  if (tooManyLoginAttempts(ip)) {
+    return res.status(429).send('Too many attempts. Wait 15 minutes and try again.');
+  }
   const supplied = (req.body && req.body.password) || '';
   const suppliedBuf = Buffer.from(supplied);
   const expectedBuf = Buffer.from(configuredPassword);
   const matches = suppliedBuf.length === expectedBuf.length && crypto.timingSafeEqual(suppliedBuf, expectedBuf);
+  recordLoginAttempt(ip, !matches);
   if (!matches) {
     return res.redirect('/admin/login?error=1');
   }
@@ -365,7 +397,7 @@ app.post('/api/shopify/discount', requireDashboardAuth, async (req, res) => {
   }
 
   const generatedCode = (code || `SECURED-${Math.floor(1000 + Math.random() * 9000)}`).toUpperCase();
-  const percentage = (parseFloat(value) || 15) / 100;
+  const percentage = Math.min(Math.max(parseFloat(value) || 15, 1), 100) / 100;
 
   const mutation = `
     mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
@@ -476,7 +508,7 @@ app.put('/api/shopify/discounts', requireDashboardAuth, async (req, res) => {
   const basicCodeDiscount = {};
   if (title !== undefined) basicCodeDiscount.title = title;
   if (value !== undefined) {
-    basicCodeDiscount.customerGets = { value: { percentage: (parseFloat(value) || 0) / 100 }, items: { all: true } };
+    basicCodeDiscount.customerGets = { value: { percentage: Math.min(Math.max(parseFloat(value) || 1, 1), 100) / 100 }, items: { all: true } };
   }
 
   try {
