@@ -350,6 +350,7 @@
     <div class="nav-item" data-view="products" onclick="switchView('products', this)"><span class="nav-icon">📦</span> Products</div>
     <div class="nav-item" data-view="customers" onclick="switchView('customers', this)"><span class="nav-icon">👤</span> Customers</div>
     <div class="nav-item" data-view="fulfillment" onclick="switchView('fulfillment', this)"><span class="nav-icon">🚚</span> Fulfillment</div>
+    <div class="nav-item" data-view="printful" onclick="switchView('printful', this)"><span class="nav-icon">🖨️</span> Printful</div>
     <div class="nav-item" data-view="discounts" onclick="switchView('discounts', this)"><span class="nav-icon">🏷️</span> Discounts</div>
     <div class="nav-item" data-view="store" onclick="switchView('store', this)"><span class="nav-icon">⚙️</span> Store</div>
     <form method="POST" action="/admin/logout" style="margin-top: auto; padding-top: 12px;">
@@ -484,6 +485,43 @@
           fulfillment service — Shopify dispatches the order and receives tracking back directly, with no
           custom integration code in the middle. This page reads that connection status straight from Shopify,
           it does not simulate or guess it.
+        </div>
+      </div>
+    </div>
+
+    <!-- PRINTFUL -->
+    <div id="view-printful" class="view">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Printful</div>
+          <div class="page-sub">Real fulfillment orders from Printful's own API</div>
+        </div>
+        <button class="btn-secondary" onclick="loadPrintfulOrders(); loadPrintfulWebhooks();">Refresh</button>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">Recent Printful orders</div></div>
+        <div id="PrintfulOrdersWrap"><div class="empty-state">Loading…</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Webhooks</div>
+          <button class="btn-secondary" onclick="registerPrintfulWebhook()">Register order events</button>
+        </div>
+        <div id="PrintfulWebhookWrap"><div class="empty-state">Loading…</div></div>
+        <div id="PrintfulWebhookEventsWrap" style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">About this page</div></div>
+        <div style="padding: 16px 18px; font-size: 0.85rem; color: var(--text-muted); line-height: 1.6;">
+          This store's Printful connection is Shopify-integrated, so Printful has no separate product catalog of
+          its own to show here — Shopify remains the single source of truth for products (see the Products page).
+          Printful's file-management API endpoint was also permanently discontinued by Printful itself, so that's
+          not something any integration can offer. What's real and live here: order status/tracking/cost, order
+          cancellation (only while an order hasn't yet entered production), and webhook events for order lifecycle
+          changes.
         </div>
       </div>
     </div>
@@ -994,6 +1032,88 @@
     loadRecentFulfillments();
   }
 
+  async function loadPrintfulOrders() {
+    const wrap = document.getElementById('PrintfulOrdersWrap');
+    try {
+      const data = await api('/api/printful/orders');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('PrintfulOrdersWrap', data.message); return; }
+      if (data.status !== 'SUCCESS') { wrap.innerHTML = `<div class="empty-state">${escapeHtml(data.message || 'Could not load Printful orders.')}</div>`; return; }
+      if (!data.orders.length) { wrap.innerHTML = '<div class="empty-state">No Printful orders yet.</div>'; return; }
+      const statusBadge = (s) => {
+        const cls = s === 'fulfilled' ? 'success' : (s === 'failed' || s === 'canceled') ? 'danger' : 'neutral';
+        return `<span class="badge ${cls}">${escapeHtml(s)}</span>`;
+      };
+      const cancellable = new Set(['draft', 'pending', 'onhold']);
+      const rows = data.orders.map(o => `
+        <tr>
+          <td><strong>${escapeHtml(o.external_id || o.id)}</strong></td>
+          <td>${escapeHtml(o.recipient_name)} ${o.recipient_country ? `(${escapeHtml(o.recipient_country)})` : ''}</td>
+          <td>${statusBadge(o.status)}</td>
+          <td>${escapeHtml(o.shipping_service)}</td>
+          <td>${o.total ? `${escapeHtml(o.currency)} ${escapeHtml(o.total)}` : '—'}</td>
+          <td>${o.dashboard_url ? `<a href="${safeUrl(o.dashboard_url)}" target="_blank" rel="noopener">View →</a>` : '—'}</td>
+          <td>${cancellable.has(o.status) ? `<button class="btn-secondary" onclick="cancelPrintfulOrder(${o.id})">Cancel</button>` : ''}</td>
+        </tr>
+      `).join('');
+      wrap.innerHTML = `<table><thead><tr><th>Order</th><th>Recipient</th><th>Status</th><th>Shipping</th><th>Cost</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    } catch (err) {
+      if (err.message === 'AUTH') { wrap.innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>'; return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function cancelPrintfulOrder(id) {
+    if (!confirm('Cancel this Printful order? This cannot be undone.')) return;
+    try {
+      const data = await apiWrite(`/api/printful/orders/${id}/cancel`, 'POST');
+      if (data.status !== 'SUCCESS') { alert(data.message || 'Could not cancel order.'); return; }
+      loadPrintfulOrders();
+    } catch (err) {
+      alert(err.message === 'AUTH' ? 'Session expired — sign in again.' : `Error: ${err.message}`);
+    }
+  }
+
+  async function loadPrintfulWebhooks() {
+    const wrap = document.getElementById('PrintfulWebhookWrap');
+    try {
+      const data = await api('/api/printful/webhooks');
+      if (data.status === 'NOT_CONNECTED') { showNotConnected('PrintfulWebhookWrap', data.message); return; }
+      if (data.status !== 'SUCCESS') { wrap.innerHTML = `<div class="empty-state">${escapeHtml(data.message || 'Could not load webhook config.')}</div>`; return; }
+      wrap.innerHTML = data.url
+        ? `<div style="padding: 12px 18px; font-size: 0.85rem;">Registered: <code>${escapeHtml(data.url)}</code><br>Events: ${data.types.map(escapeHtml).join(', ')}</div>`
+        : '<div class="empty-state">No webhook registered yet.</div>';
+    } catch (err) {
+      if (err.message === 'AUTH') { wrap.innerHTML = '<div class="empty-state">Session expired — <a href="/admin/login">sign in again</a>.</div>'; return; }
+      wrap.innerHTML = `<div class="empty-state">Error: ${escapeHtml(err.message)}</div>`;
+    }
+    loadPrintfulWebhookEvents();
+  }
+
+  async function registerPrintfulWebhook() {
+    try {
+      const data = await apiWrite('/api/printful/webhooks', 'POST');
+      if (data.status !== 'SUCCESS') { alert(data.message || 'Could not register webhook.'); return; }
+      loadPrintfulWebhooks();
+    } catch (err) {
+      alert(err.message === 'AUTH' ? 'Session expired — sign in again.' : `Error: ${err.message}`);
+    }
+  }
+
+  async function loadPrintfulWebhookEvents() {
+    const wrap = document.getElementById('PrintfulWebhookEventsWrap');
+    try {
+      const data = await api('/api/printful/webhook-events');
+      if (!data.events || !data.events.length) { wrap.innerHTML = '<div class="empty-state">No events received yet.</div>'; return; }
+      wrap.innerHTML = data.events.map(e => `
+        <div style="font-size: 0.8rem; padding: 6px 0; border-bottom: 1px solid var(--border);">
+          <strong>${escapeHtml(e.type)}</strong> — ${escapeHtml(e.received_at)}
+        </div>
+      `).join('');
+    } catch (err) {
+      wrap.innerHTML = '';
+    }
+  }
+
   async function loadLocations() {
     const wrap = document.getElementById('LocationsWrap');
     try {
@@ -1309,6 +1429,8 @@
     loadProducts();
     loadCustomers();
     loadFulfillment();
+    loadPrintfulOrders();
+    loadPrintfulWebhooks();
     loadDiscounts();
     loadAttentionOrders();
     loadRevenueTrend();

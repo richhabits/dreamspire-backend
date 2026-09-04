@@ -196,6 +196,8 @@ app.use('/api/shopify/shop', requireDashboardAuth);
 app.use('/api/shopify/customers', requireDashboardAuth);
 app.use('/api/fulfillment/status', requireDashboardAuth);
 app.use('/api/shopify/analytics', requireDashboardAuth);
+app.use('/api/printful/orders', requireDashboardAuth);
+app.use('/api/printful/webhooks', requireDashboardAuth);
 
 // Parse a Shopify REST `Link` response header into { next, previous } page_info
 // cursors -- the modern cursor-based pagination scheme (page-number pagination
@@ -214,6 +216,7 @@ function parseLinkHeader(header) {
 
 const PORT = process.env.PORT || 4000;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_URL || "anznev-5s.myshopify.com";
+const PRINTFUL_STORE_ID = process.env.PRINTFUL_STORE_ID || "14904650";
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2023-10-16' }) : null;
 
@@ -709,6 +712,140 @@ app.get('/api/shopify/orders/:id/detail', async (req, res) => {
   } catch (err) {
     res.status(500).json({ status: "ERROR", message: err.message });
   }
+});
+
+// 4.0.055 Real Printful fulfillment orders (separate from Shopify's own order
+// list -- this is genuine fulfillment-side status/tracking/cost data from the
+// service actually printing and shipping the garments). This store is
+// Shopify-integrated on Printful's side, so there is no separate "sync
+// products" list to show here -- Shopify remains the single source of truth
+// for the catalog. Orders only.
+app.get('/api/printful/orders', async (req, res) => {
+  const token = process.env.PRINTFUL_API_TOKEN;
+
+  if (!token) {
+    return res.json({
+      status: "NOT_CONNECTED",
+      orders: [],
+      message: "No live Printful API token configured. Set PRINTFUL_API_TOKEN to enable real fulfillment sync."
+    });
+  }
+
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const limit = 20;
+
+  try {
+    const pfRes = await fetch(`https://api.printful.com/orders?limit=${limit}&offset=${offset}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'X-PF-Store-Id': PRINTFUL_STORE_ID
+      }
+    });
+    const data = await pfRes.json();
+    if (!pfRes.ok) {
+      return res.status(pfRes.status).json({ status: "ERROR", message: data?.error?.message || data?.result || 'Printful API error' });
+    }
+    const mapped = (data.result || []).map(o => ({
+      id: o.id,
+      external_id: o.external_id,
+      status: o.status,
+      recipient_name: o.recipient?.name || '',
+      recipient_country: o.recipient?.country_code || '',
+      shipping_service: o.shipping_service_name || o.shipping || '',
+      total: o.costs?.total || null,
+      currency: o.costs?.currency || 'USD',
+      dashboard_url: o.dashboard_url || null,
+      created_at: o.created ? new Date(o.created * 1000).toISOString() : null
+    }));
+    return res.json({
+      status: "SUCCESS",
+      orders: mapped,
+      paging: data.paging || null
+    });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+// 4.0.056 Cancel a real Printful order. Only meaningful for orders not yet
+// in production (Printful rejects this once an item has entered fulfillment)
+// -- the frontend only shows the button for cancellable statuses.
+app.post('/api/printful/orders/:id/cancel', async (req, res) => {
+  const token = process.env.PRINTFUL_API_TOKEN;
+  if (!token) return res.status(503).json({ status: 'ERROR', message: 'Printful not configured.' });
+  try {
+    const pfRes = await fetch(`https://api.printful.com/orders/${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}`, 'X-PF-Store-Id': PRINTFUL_STORE_ID }
+    });
+    const data = await pfRes.json();
+    if (!pfRes.ok) {
+      return res.status(pfRes.status).json({ status: 'ERROR', message: data?.error?.message || data?.result || 'Printful rejected the cancellation.' });
+    }
+    return res.json({ status: 'SUCCESS' });
+  } catch (err) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// 4.0.057 Printful webhook management -- view what's currently registered,
+// and register the real set of order-lifecycle events against this backend's
+// own public receiver below. GET/POST here are dashboard-gated; the receiver
+// itself is intentionally public since Printful (not us) calls it.
+app.get('/api/printful/webhooks', async (req, res) => {
+  const token = process.env.PRINTFUL_API_TOKEN;
+  if (!token) return res.json({ status: 'NOT_CONNECTED', message: 'No live Printful API token configured.' });
+  try {
+    const pfRes = await fetch('https://api.printful.com/webhooks', {
+      headers: { 'Authorization': `Bearer ${token}`, 'X-PF-Store-Id': PRINTFUL_STORE_ID }
+    });
+    const data = await pfRes.json();
+    if (!pfRes.ok) return res.status(pfRes.status).json({ status: 'ERROR', message: data?.error?.message || 'Printful API error' });
+    return res.json({ status: 'SUCCESS', url: data.result?.url || null, types: data.result?.types || [] });
+  } catch (err) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+app.post('/api/printful/webhooks', async (req, res) => {
+  const token = process.env.PRINTFUL_API_TOKEN;
+  if (!token) return res.status(503).json({ status: 'ERROR', message: 'Printful not configured.' });
+  const receiverUrl = `https://${req.get('host')}/api/printful/webhook-receiver`;
+  try {
+    const pfRes = await fetch('https://api.printful.com/webhooks', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'X-PF-Store-Id': PRINTFUL_STORE_ID,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        url: receiverUrl,
+        types: ['order_created', 'order_updated', 'order_failed', 'order_canceled', 'package_shipped', 'package_returned']
+      })
+    });
+    const data = await pfRes.json();
+    if (!pfRes.ok) return res.status(pfRes.status).json({ status: 'ERROR', message: data?.error?.message || 'Printful rejected the registration.' });
+    return res.json({ status: 'SUCCESS', url: receiverUrl });
+  } catch (err) {
+    res.status(500).json({ status: 'ERROR', message: err.message });
+  }
+});
+
+// Public receiver -- Printful calls this directly, no dashboard session
+// exists on that request. Keeps the last 50 events in memory (resets on
+// cold start / redeploy, same tradeoff as this file's existing in-memory
+// rate limiter) so the dashboard has something real to show; not a
+// database, just enough to prove events are actually arriving.
+const printfulWebhookEvents = [];
+app.post('/api/printful/webhook-receiver', (req, res) => {
+  printfulWebhookEvents.unshift({ received_at: new Date().toISOString(), type: req.body?.type || 'unknown', data: req.body?.data || null });
+  if (printfulWebhookEvents.length > 50) printfulWebhookEvents.length = 50;
+  res.status(200).json({ received: true });
+});
+
+app.get('/api/printful/webhook-events', requireDashboardAuth, (req, res) => {
+  res.json({ status: 'SUCCESS', events: printfulWebhookEvents });
 });
 
 // 4.0.06 Real revenue trend, computed server-side from real orders (paginates
