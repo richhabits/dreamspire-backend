@@ -1302,83 +1302,6 @@ app.post('/api/marketing/sync', async (req, res) => {
   }
 });
 
-// 8.6 Creator Roster application (creator-hub.liquid's "APPLY FOR CREATOR
-// ROSTER" form calls this). Distinct from the VIP Archive opt-in above --
-// this is a business-partnership application, not a marketing signup, so it
-// tags separately and does NOT set email_marketing_consent.
-const creatorApplyLimiter = createRateLimiter(10, 15 * 60 * 1000);
-
-function buildCreatorApplicantPayload({ email, handle, scenario, existing }) {
-  const existingTags = existing?.tags ? existing.tags.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const tags = Array.from(new Set([...existingTags, 'Creator-Applicant'])).join(', ');
-  const noteLine = `Creator roster application — handle: ${handle}, content scenario: ${scenario}`;
-  return {
-    email,
-    tags,
-    note: existing?.note ? `${existing.note}\n${noteLine}` : noteLine
-  };
-}
-
-app.post('/api/creator/apply', async (req, res) => {
-  if (creatorApplyLimiter.isBlocked(getClientIp(req))) {
-    return res.status(429).json({ status: "ERROR", message: "Too many applications. Please try again later." });
-  }
-  creatorApplyLimiter.record(getClientIp(req), true);
-
-  const { handle, email, scenario } = req.body || {};
-  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
-
-  if (!handle || !email) {
-    return res.status(400).json({ status: "ERROR", message: "Handle and email are required." });
-  }
-  if (!token || token === 'shpat_demo_token_12345') {
-    return res.status(503).json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
-  }
-
-  try {
-    let existing = await findShopifyCustomerByEmail(token, email);
-    const scenarioLabel = scenario || 'Not specified';
-
-    let custRes = existing
-      ? await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${existing.id}.json`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-          body: JSON.stringify({ customer: { id: existing.id, ...buildCreatorApplicantPayload({ email, handle, scenario: scenarioLabel, existing }) } })
-        })
-      : await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers.json`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-          body: JSON.stringify({ customer: buildCreatorApplicantPayload({ email, handle, scenario: scenarioLabel, existing: null }) })
-        });
-
-    // Same search-index lag as /api/marketing/sync -- treat Shopify's own
-    // "email already taken" conflict as authoritative and retry as an update.
-    if (!custRes.ok && !existing && custRes.status === 422) {
-      const errBody = await custRes.clone().json().catch(() => null);
-      const emailTaken = errBody?.errors?.email?.some(m => /taken/i.test(m));
-      if (emailTaken) {
-        existing = await findShopifyCustomerByEmailWithRetry(token, email);
-        if (existing) {
-          custRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${existing.id}.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-            body: JSON.stringify({ customer: { id: existing.id, ...buildCreatorApplicantPayload({ email, handle, scenario: scenarioLabel, existing }) } })
-          });
-        }
-      }
-    }
-
-    if (!custRes.ok) {
-      const errBody = await custRes.text();
-      return res.status(custRes.status).json({ status: "ERROR", message: `Shopify rejected the application (${custRes.status}): ${errBody}` });
-    }
-    const custData = await custRes.json();
-    return res.json({ status: "SUCCESS", customer_id: custData.customer?.id });
-  } catch (err) {
-    res.status(500).json({ status: "ERROR", message: err.message });
-  }
-});
-
 // 8b. Game High Scores (cross-device via customer metafield)
 // Only meaningful for logged-in customers -- guests keep the localStorage
 // fallback client-side, same as before. Rate-limited per IP since it's
@@ -1573,7 +1496,7 @@ app.post('/api/ai/chat', async (req, res) => {
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
     console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
-    console.log(`Endpoints active: /admin, /api/health, /api/google/feed.xml, /api/shopify/{orders,products,shop,customers,discounts,locations,fulfillments,analytics}, /api/fulfillment/status, /api/marketing/sync, /api/creator/apply, /api/ai/chat`);
+    console.log(`Endpoints active: /admin, /api/health, /api/google/feed.xml, /api/shopify/{orders,products,shop,customers,discounts,locations,fulfillments,analytics}, /api/fulfillment/status, /api/marketing/sync, /api/ai/chat`);
   });
 }
 
