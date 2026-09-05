@@ -1459,6 +1459,106 @@ app.post('/api/creator/apply', async (req, res) => {
   }
 });
 
+// 8b. Game High Scores (cross-device via customer metafield)
+// Only meaningful for logged-in customers -- guests keep the localStorage
+// fallback client-side, same as before. Rate-limited per IP since it's
+// unauthenticated aside from the customer ID the theme already trusts.
+const scoreLimiter = createRateLimiter(60, 5 * 60 * 1000);
+const SCORE_NAMESPACE = 'dreamspire_games';
+const ALLOWED_GAME_KEYS = new Set(['drop_catcher_best']);
+
+app.get('/api/scores/:game', async (req, res) => {
+  const key = `${req.params.game}_best`;
+  const customerId = req.query.customerId;
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  if (!ALLOWED_GAME_KEYS.has(key)) {
+    return res.status(400).json({ status: "ERROR", message: "Unknown game." });
+  }
+  if (!customerId) {
+    return res.status(400).json({ status: "ERROR", message: "customerId is required." });
+  }
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.status(503).json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+  try {
+    const mfRes = await fetch(
+      `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${customerId}/metafields.json?namespace=${SCORE_NAMESPACE}&key=${key}`,
+      { headers: { 'X-Shopify-Access-Token': token } }
+    );
+    if (!mfRes.ok) {
+      const errBody = await mfRes.text();
+      return res.status(mfRes.status).json({ status: "ERROR", message: `Shopify error (${mfRes.status}): ${errBody}` });
+    }
+    const data = await mfRes.json();
+    const best = data.metafields?.[0]?.value ? parseInt(data.metafields[0].value, 10) : 0;
+    res.json({ status: "SUCCESS", best });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
+app.post('/api/scores/:game', async (req, res) => {
+  if (scoreLimiter.isBlocked(getClientIp(req))) {
+    return res.status(429).json({ status: "ERROR", message: "Too many requests. Please try again later." });
+  }
+  scoreLimiter.record(getClientIp(req), true);
+
+  const key = `${req.params.game}_best`;
+  const { customerId, score } = req.body || {};
+  const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+  if (!ALLOWED_GAME_KEYS.has(key)) {
+    return res.status(400).json({ status: "ERROR", message: "Unknown game." });
+  }
+  if (!customerId || !Number.isFinite(score)) {
+    return res.status(400).json({ status: "ERROR", message: "customerId and numeric score are required." });
+  }
+  if (!token || token === 'shpat_demo_token_12345') {
+    return res.status(503).json({ status: "NOT_CONNECTED", message: "No live Shopify Admin API token configured." });
+  }
+  try {
+    const existingRes = await fetch(
+      `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${customerId}/metafields.json?namespace=${SCORE_NAMESPACE}&key=${key}`,
+      { headers: { 'X-Shopify-Access-Token': token } }
+    );
+    const existingData = existingRes.ok ? await existingRes.json() : { metafields: [] };
+    const existing = existingData.metafields?.[0];
+    const currentBest = existing?.value ? parseInt(existing.value, 10) : 0;
+    const best = Math.max(currentBest, Math.round(score));
+
+    if (best === currentBest && existing) {
+      return res.json({ status: "SUCCESS", best });
+    }
+
+    const mfPayload = {
+      metafield: {
+        namespace: SCORE_NAMESPACE,
+        key,
+        value: String(best),
+        type: 'number_integer'
+      }
+    };
+    const writeRes = existing
+      ? await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/metafields/${existing.id}.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+          body: JSON.stringify(mfPayload)
+        })
+      : await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/customers/${customerId}/metafields.json`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+          body: JSON.stringify(mfPayload)
+        });
+
+    if (!writeRes.ok) {
+      const errBody = await writeRes.text();
+      return res.status(writeRes.status).json({ status: "ERROR", message: `Shopify rejected the score (${writeRes.status}): ${errBody}` });
+    }
+    res.json({ status: "SUCCESS", best });
+  } catch (err) {
+    res.status(500).json({ status: "ERROR", message: err.message });
+  }
+});
+
 // 9. Secure AI Chat Proxy (Anthropic SDK + Free Multi-Model Engine)
 // Public/unauthenticated by design (the storefront chat widget calls this
 // directly), so it's the one endpoint here that could run up a real bill
