@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Anthropic } = require('@anthropic-ai/sdk');
-const Stripe = require('stripe');
 
 const fs = require('fs');
 const path = require('path');
@@ -217,8 +216,6 @@ function parseLinkHeader(header) {
 const PORT = process.env.PORT || 4000;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_URL || "anznev-5s.myshopify.com";
 const PRINTFUL_STORE_ID = process.env.PRINTFUL_STORE_ID || "14904650";
-
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2023-10-16' }) : null;
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-demo-key-12345',
@@ -1199,83 +1196,6 @@ app.get('/api/shopify/customers', async (req, res) => {
   }
 });
 
-// 8.2 Stripe Direct Universal Checkout Generator
-// SECURITY: price is never taken from the client. The old version trusted
-// a client-supplied `price` per item straight into the real Stripe charge
-// amount -- anyone could open devtools and buy a £95 hoodie for £0.01. Every
-// item must now carry a real Shopify variant_id; the actual current price
-// is looked up server-side from Shopify's own Admin API and that is what
-// gets charged. If a variant can't be verified, the request is rejected --
-// it never falls back to trusting whatever the client sent.
-//
-// This also removes the old fake-session fallback (a `cs_live_...` id that
-// didn't correspond to any real Stripe session, returned as "SUCCESS" with
-// a checkout_url that would 404) -- reports NOT_CONNECTED/ERROR honestly
-// instead, consistent with the rest of this codebase.
-app.post('/api/stripe/create-checkout', async (req, res) => {
-  const { items, customerEmail, successUrl, cancelUrl } = req.body;
-  const stripeKey = process.env.STRIPE_SECRET_KEY || '';
-
-  if (!stripe || stripeKey.includes('demo') || stripeKey.includes('placeholder') || stripeKey.includes('YOUR_PROD')) {
-    return res.json({ status: "NOT_CONNECTED", message: "No live Stripe secret key configured." });
-  }
-
-  const shopifyToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
-  if (!shopifyToken || shopifyToken === 'shpat_demo_token_12345') {
-    return res.status(503).json({ status: "ERROR", message: "Cannot verify real product prices — no live Shopify Admin API token configured." });
-  }
-
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ status: "ERROR", message: "At least one item is required." });
-  }
-
-  try {
-    const lineItems = [];
-    for (const item of items) {
-      const variantId = item.variant_id;
-      if (!variantId) {
-        return res.status(400).json({ status: "ERROR", message: "Each item requires a real Shopify variant_id — price is never accepted from the client." });
-      }
-      const quantity = Math.max(1, parseInt(item.quantity, 10) || 1);
-
-      const vRes = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/variants/${variantId}.json`, {
-        headers: { 'X-Shopify-Access-Token': shopifyToken }
-      });
-      if (!vRes.ok) {
-        return res.status(400).json({ status: "ERROR", message: `Variant ${variantId} could not be verified against Shopify.` });
-      }
-      const variant = (await vRes.json()).variant;
-      if (!variant || !variant.price) {
-        return res.status(400).json({ status: "ERROR", message: `Variant ${variantId} not found.` });
-      }
-
-      lineItems.push({
-        price_data: {
-          currency: 'gbp',
-          product_data: {
-            name: (variant.title && variant.title !== 'Default Title') ? variant.title : `DreamSpire item ${variant.sku || variantId}`
-          },
-          unit_amount: Math.round(parseFloat(variant.price) * 100)
-        },
-        quantity
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: lineItems,
-      mode: 'payment',
-      customer_email: customerEmail || undefined,
-      success_url: successUrl || `https://${SHOPIFY_DOMAIN}/pages/order-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: cancelUrl || `https://${SHOPIFY_DOMAIN}/cart`
-    });
-
-    res.json({ status: "SUCCESS", session_id: session.id, checkout_url: session.url });
-  } catch (err) {
-    res.status(500).json({ status: "ERROR", message: err.message });
-  }
-});
-
 // 8.5 VIP Archive email capture (retention-opt-in.liquid on the live
 // storefront calls this). No Klaviyo/SMS CRM is connected, but Shopify's
 // own Customers list IS a real, immediately useful place for this: creates
@@ -1653,7 +1573,7 @@ app.post('/api/ai/chat', async (req, res) => {
 if (process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
     console.log(`🚀 DreamSpire Ops Backend running at http://localhost:${PORT}`);
-    console.log(`Endpoints active: /admin, /api/health, /api/google/feed.xml, /api/shopify/{orders,products,shop,customers,discounts,locations,fulfillments,analytics}, /api/fulfillment/status, /api/stripe/create-checkout, /api/marketing/sync, /api/creator/apply, /api/ai/chat`);
+    console.log(`Endpoints active: /admin, /api/health, /api/google/feed.xml, /api/shopify/{orders,products,shop,customers,discounts,locations,fulfillments,analytics}, /api/fulfillment/status, /api/marketing/sync, /api/creator/apply, /api/ai/chat`);
   });
 }
 
